@@ -1,0 +1,1914 @@
+
+
+==================================================
+# فایل: config.py
+==================================================
+
+import os
+
+
+class Config:
+    # تنظیمات دیتابیس
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_PORT = os.getenv("DB_PORT", 3308)
+    DB_USER = os.getenv("DB_USER", "testuser")
+    DB_PASS = os.getenv("DB_PASS", "testpass")
+    DB_NAME = os.getenv("DB_NAME", "print3d")
+
+    # تنظیمات تلگرام
+    TG_TOKEN = os.getenv("TG_TOKEN", "YOUR_BOT_TOKEN")
+
+    # لیست ادمین‌ها (آیدی عددی)
+    ADMINS = [2138687434]  # جایگزین کنید با آیدی واقعی ادمین
+
+    # تنظیمات رفرال
+    REFERRAL_CODE_LENGTH = 10
+    ADMIN_CODE_PREFIX = "ADMIN_"
+
+==================================================
+# فایل: database.py
+==================================================
+
+import mysql.connector
+from datetime import datetime, timedelta
+import secrets
+import string
+import logging
+from config import Config
+
+logger = logging.getLogger(__name__)
+
+# تنظیمات پایه
+ADMIN_ID = 2138687434
+
+# ----------------------
+# توابع اتصال به دیتابیس
+# ----------------------
+def get_db_connection():
+    return mysql.connector.connect(
+        host='localhost',
+        port=3308,          # پورتی که در Docker تنظیم کردید
+        user='testuser',    # کاربر تعریف شده در docker-compose.yml
+        password='testpass', # رمز عبور کاربر testuser
+        database='print3d'
+    )
+
+
+
+
+def is_admin(user_id: int) -> bool:
+    """بررسی دسترسی ادمین"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT is_admin FROM users
+            WHERE id = %s
+        """, (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else False
+    except Exception as e:
+        logger.error(f"خطای بررسی ادمین: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+# ----------------------
+# توابع کمکی
+# ----------------------
+def generate_referral_code(is_admin: bool = False) -> str:
+    """
+    تولید کد رفرال با پیشوند ADMIN_ برای ادمین‌ها
+    """
+    prefix = "ADMIN_" if is_admin else ""
+    suffix = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+    return f"{prefix}{suffix}"
+
+# ----------------------
+# ایجاد جداول (بهینه‌سازی شده برای MySQL)
+# ----------------------
+def create_tables():
+    """ایجاد جداول با سینتکس صحیح MySQL"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        # جدول کاربران
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGINT PRIMARY KEY,
+                full_name VARCHAR(255) NOT NULL,
+                phone VARCHAR(20) UNIQUE NOT NULL,
+                inviter_id BIGINT,
+                remaining_invites INT DEFAULT 1,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                is_admin BOOLEAN DEFAULT FALSE  # <-- اضافه کردن این خط
+            )
+        ''')
+
+        # جدول فایل‌ها
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS files (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                file_name VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(100),
+                file_id VARCHAR(255) UNIQUE NOT NULL,
+                file_unique_id VARCHAR(255),
+                created_at DATETIME NOT NULL,
+                quantity INT DEFAULT 1,
+                description TEXT,
+                status VARCHAR(50) DEFAULT 'در حال انجام',
+                notes TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+
+        # جدول رفرال‌ها
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                referral_code VARCHAR(50) UNIQUE NOT NULL,
+                used_by BIGINT DEFAULT NULL,
+                created_at DATETIME NOT NULL,
+                expires_at DATETIME NOT NULL,
+                is_admin BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (referrer_id) REFERENCES users(id)
+            )
+        ''')
+
+        # جدول مدعوین
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS invited_users (
+                referrer_id BIGINT NOT NULL,
+                invited_user_id BIGINT PRIMARY KEY,
+                invited_full_name VARCHAR(255) NOT NULL,
+                invited_phone VARCHAR(20) NOT NULL,
+                invited_at DATETIME NOT NULL,
+                FOREIGN KEY (referrer_id) REFERENCES users(id),
+                FOREIGN KEY (invited_user_id) REFERENCES users(id)
+            )
+        ''')
+
+        # جدول کیف پول
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wallets (
+                user_id BIGINT PRIMARY KEY,
+                balance DECIMAL(10,2) DEFAULT 0.00,
+                discount DECIMAL(10,2) DEFAULT 0.00,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+
+        logger.info("جداول با موفقیت ایجاد شدند")
+    except mysql.connector.Error as err:
+        logger.error(f"خطا در ایجاد جداول: {err}")
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ----------------------
+# توابع کاربران
+# ----------------------
+def add_user(user_data):
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # کوئری اصلاح شده با پارامترهای صحیح
+        cursor.execute('''
+            INSERT INTO users 
+            (id, full_name, phone, inviter_id, created_at, updated_at, is_admin)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ''', (
+            user_data['id'],
+            user_data['full_name'],
+            user_data['phone'],
+            user_data.get('inviter_id'),
+            user_data.get('created_at', datetime.now()),
+            datetime.now(),  # updated_at
+            user_data.get('is_admin', False)  # مقدار پیشفرض برای is_admin
+        ))
+
+        conn.commit()
+        return True
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {str(e)}")
+        return False
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+
+# ----------------------
+# توابع رفرال
+# ----------------------
+# ==============================
+# ███ CREATING REFERRAL CODE ███
+# ==============================
+def create_referral(
+        user_id: int,
+        is_admin: bool = False,
+        code_length: int = 10,
+        prefix: str = ""
+) -> str:
+    chars = string.ascii_uppercase + string.digits
+    code = prefix + ''.join(secrets.choice(chars) for _ in range(code_length))
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO referrals 
+            (referrer_id, code, is_admin)
+            VALUES (%s, %s, %s)
+        """, (user_id, code, is_admin))
+        conn.commit()
+        return code
+    except IntegrityError:
+        return create_referral(user_id, is_admin, code_length, prefix)  # Retry
+    finally:
+        conn.close()
+
+
+# ----------------------
+# توابع اعتبارسنجی رفرال
+# ----------------------
+def validate_referral(code):
+    """اعتبارسنجی کد دعوت و بازگرداندن referrer_id"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute('''
+            SELECT referrer_id, expires_at 
+            FROM referrals 
+            WHERE referral_code = %s 
+                AND used_by IS NULL
+                AND expires_at > NOW()
+        ''', (code,))
+
+        result = cursor.fetchone()
+        if not result:
+            logger.warning(f"کد دعوت نامعتبر یا منقضی شده: {code}")
+            return False, "کد نامعتبر یا منقضی شده است"
+
+        return True, result['referrer_id']
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در اعتبارسنجی رفرال: {e}")
+        return False, "خطای سیستمی"
+    except Exception as e:
+        logger.error(f"خطای ناشناخته در اعتبارسنجی: {e}", exc_info=True)
+        return False, "خطای سیستمی"
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ----------------------
+# توابع مدیریت مدعوین
+# ----------------------
+def add_invited_user(referrer_id, user_data):
+    """ذخیره اطلاعات کاربر دعوت شده با مدیریت تراکنش"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # تبدیل تاریخ به فرمت مناسب دیتابیس
+        invited_at = datetime.now()
+        full_data = (
+            referrer_id,
+            user_data[0],  # invited_user_id
+            user_data[1],  # invited_full_name
+            user_data[2],  # invited_phone
+            invited_at
+        )
+
+        cursor.execute('''
+            INSERT INTO invited_users 
+            (referrer_id, invited_user_id, invited_full_name, invited_phone, invited_at)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', full_data)
+
+        conn.commit()
+        logger.info(f"کاربر دعوت شده {user_data[0]} با موفقیت ثبت شد")
+        return True
+
+    except mysql.connector.IntegrityError as e:
+        logger.error(f"خطای یکتایی در ثبت مدعو: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"خطا در ثبت مدعو: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def mark_referral_used(code, used_by):
+    """علامت‌گذاری کد دعوت به عنوان استفاده شده"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE referrals 
+            SET used_by = %s 
+            WHERE referral_code = %s
+        ''', (used_by, code))
+
+        conn.commit()
+        logger.info(f"کد دعوت {code} توسط کاربر {used_by} استفاده شد")
+        return cursor.rowcount > 0
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در بروزرسانی رفرال: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def get_invited_users(referrer_id):
+    """دریافت لیست مدعوین با فرمت منظم"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute('''
+            SELECT 
+                invited_full_name AS name,
+                invited_phone AS phone,
+                DATE_FORMAT(invited_at, '%%Y/%%m/%%d %%H:%%i') AS date
+            FROM invited_users 
+            WHERE referrer_id = %s
+            ORDER BY invited_at DESC
+        ''', (referrer_id,))
+
+        return cursor.fetchall()
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت مدعوین: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def decrement_invites(user_id):
+    """کاهش تعداد دعوت‌های باقی‌مانده کاربر"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE users 
+            SET remaining_invites = GREATEST(remaining_invites - 1, 0)
+            WHERE id = %s
+        ''', (user_id,))
+
+        conn.commit()
+        logger.debug(f"تعداد دعوت‌های کاربر {user_id} کاهش یافت")
+        return cursor.rowcount > 0
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در کاهش دعوت‌ها: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ----------------------
+# توابع کاربران (تکمیلی)
+# ----------------------
+def get_user(user_id):
+    """دریافت اطلاعات کاربر با فرمت دیکشنری"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute('''
+            SELECT 
+                u.*,
+                w.balance,
+                w.discount
+            FROM users u
+            LEFT JOIN wallets w ON u.id = w.user_id
+            WHERE u.id = %s
+        ''', (user_id,))
+
+        result = cursor.fetchone()
+        if result:
+            # تبدیل مقادیر عددی به نوع صحیح
+            result['remaining_invites'] = int(result['remaining_invites'])
+            result['balance'] = float(result['balance'])
+            result['discount'] = float(result['discount'])
+
+        return result
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت کاربر: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ----------------------
+# توابع مدیریت فایل‌ها
+# ----------------------
+def get_active_orders(user_id):
+    """دریافت سفارشات فعال کاربر با فرمت دیکشنری"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT 
+                id,
+                file_name,
+                quantity,
+                status,
+                created_at
+            FROM files 
+            WHERE user_id = %s 
+                AND status = 'در حال انجام'
+            ORDER BY created_at DESC
+        """, (user_id,))
+
+        orders = []
+        for order in cursor.fetchall():
+            # تبدیل تاریخ به فرمت قابل خواندن
+            order['created_at'] = order['created_at'].strftime("%Y/%m/%d %H:%M")
+            orders.append(order)
+
+        return orders
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت سفارشات: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def get_active_orders_count(user_id):
+    """دریافت تعداد سفارشات فعال با بهینه‌سازی کوئری"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COUNT(id) 
+            FROM files 
+            WHERE user_id = %s 
+                AND status = 'در حال انجام'
+        """, (user_id,))
+
+        return cursor.fetchone()[0] or 0
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در شمارش سفارشات: {e}")
+        return 0
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def add_file(file_data):
+    """ذخیره امن اطلاعات فایل با مدیریت تراکنش"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # اعتبارسنجی داده‌های ورودی
+        required_fields = [
+            'user_id', 'file_name', 'mime_type',
+            'file_id', 'file_unique_id', 'created_at'
+        ]
+        if len(file_data) < 6:
+            raise ValueError("داده‌های فایل ناقص است")
+
+        # درج فایل جدید
+        cursor.execute('''
+            INSERT INTO files (
+                user_id, file_name, mime_type,
+                file_id, file_unique_id, created_at,
+                quantity, description, status, notes
+            ) VALUES (
+                %s, %s, %s,
+                %s, %s, %s,
+                COALESCE(%s, 1),  # مقدار پیشفرض برای تعداد
+                COALESCE(%s, 'فاقد توضیحات'),
+                COALESCE(%s, 'در حال انجام'),
+                COALESCE(%s, '')
+            )
+        ''', file_data)
+
+        conn.commit()
+        logger.info(f"فایل جدید با ID {cursor.lastrowid} ثبت شد")
+        return True
+
+    except mysql.connector.IntegrityError as e:
+        logger.error(f"خطای یکتایی فایل: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"خطا در ثبت فایل: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def get_files_by_user(user_id, days=None):
+    """دریافت فایل‌های کاربر با فیلتر زمانی"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        query = """
+            SELECT 
+                id,
+                file_name,
+                quantity,
+                status,
+                created_at
+            FROM files 
+            WHERE user_id = %s
+        """
+        params = [user_id]
+
+        if days and days > 0:
+            query += " AND created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)"
+            params.append(days)
+
+        query += " ORDER BY created_at DESC"
+
+        cursor.execute(query, params)
+
+        files = []
+        for file in cursor.fetchall():
+            file['created_at'] = file['created_at'].strftime("%Y/%m/%d")
+            files.append(file)
+
+        return files
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت فایل‌ها: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def update_file_description(file_id, description):
+    """به روزرسانی توضیحات فایل با اعتبارسنجی"""
+    conn = None
+    cursor = None
+    try:
+        if not description or len(description) > 500:
+            raise ValueError("توضیحات نامعتبر")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE files 
+            SET description = %s 
+            WHERE file_id = %s
+        """, (description, file_id))
+
+        conn.commit()
+        logger.info(f"توضیحات فایل {file_id} به‌روزرسانی شد")
+        return cursor.rowcount > 0
+
+    except ValueError as e:
+        logger.warning(f"خطای اعتبارسنجی: {e}")
+        return False
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در بروزرسانی: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def get_file_quantity(file_id):
+    """دریافت تعداد فایل با مدیریت خطا"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COALESCE(quantity, 1) 
+            FROM files 
+            WHERE file_id = %s
+        """, (file_id,))
+
+        result = cursor.fetchone()
+        return result[0] if result else 1
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت تعداد: {e}")
+        return 1
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def update_file_quantity(file_id, new_qty):
+    """به روزرسانی تعداد با اعتبارسنجی مقدار ورودی"""
+    conn = None
+    cursor = None
+    try:
+        if not isinstance(new_qty, int) or new_qty < 1:
+            raise ValueError("تعداد نامعتبر")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE files 
+            SET quantity = GREATEST(%s, 1) 
+            WHERE file_id = %s
+        """, (new_qty, file_id))
+
+        conn.commit()
+        logger.info(f"تعداد فایل {file_id} به {new_qty} به‌روزرسانی شد")
+        return cursor.rowcount > 0
+
+    except ValueError as e:
+        logger.warning(f"خطای اعتبارسنجی تعداد: {e}")
+        return False
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در بروزرسانی تعداد: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def delete_file(file_id):
+    """حذف امن فایل با بررسی وجود رکورد"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # بررسی وجود فایل قبل از حذف
+        cursor.execute("SELECT id FROM files WHERE file_id = %s", (file_id,))
+        if not cursor.fetchone():
+            logger.warning(f"فایل با شناسه {file_id} یافت نشد")
+            return False
+
+        cursor.execute("DELETE FROM files WHERE file_id = %s", (file_id,))
+        conn.commit()
+        logger.info(f"فایل {file_id} با موفقیت حذف شد")
+        return True
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در حذف فایل: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ----------------------
+# توابع مدیریت دعوت‌ها و هدایا
+# ----------------------
+def get_remaining_invites(user_id):
+    """دریافت تعداد دعوت‌های باقی‌مانده کاربر"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COALESCE(remaining_invites, 0)
+            FROM users 
+            WHERE id = %s
+        """, (user_id,))
+
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس در دریافت دعوت‌ها: {e}")
+        return 0
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def add_discount(user_id, amount):
+    """افزودن تخفیف به کیف پول کاربر با اعتبارسنجی"""
+    conn = None
+    cursor = None
+    try:
+        # اعتبارسنجی مقدار تخفیف
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            raise ValueError("مقدار تخفیف نامعتبر")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE wallets 
+            SET discount = discount + %s 
+            WHERE user_id = %s
+        """, (amount, user_id))
+
+        conn.commit()
+        logger.info(f"تخفیف {amount} به کاربر {user_id} افزوده شد")
+        return cursor.rowcount > 0
+
+    except ValueError as e:
+        logger.warning(f"خطای اعتبارسنجی: {e}")
+        return False
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def meets_gift_conditions(user_id):
+    """بررسی شرایط دریافت هدیه"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT 
+                COUNT(*) AS total_completed,
+                SUM(quantity) AS total_quantity
+            FROM files 
+            WHERE 
+                user_id = %s 
+                AND status = 'تکمیل شده'
+                AND created_at >= DATE_SUB(NOW(), INTERVAL 3 MONTH)
+        """, (user_id,))
+
+        result = cursor.fetchone()
+        return result['total_completed'] >= 3 and result['total_quantity'] >= 10
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def get_completed_orders(user_id):
+    """دریافت سفارشات تکمیل شده با فرمت‌بندی"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT 
+                id,
+                file_name,
+                quantity,
+                DATE_FORMAT(created_at, '%%Y/%%m/%%d %%H:%%i') AS created_at,
+                description
+            FROM files 
+            WHERE 
+                user_id = %s 
+                AND status = 'تکمیل شده'
+            ORDER BY created_at DESC
+        """, (user_id,))
+
+        return cursor.fetchall()
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ----------------------
+# توابع درخت دعوت
+# ----------------------
+def get_referral_tree(user_id):
+    """دریافت ساختار درختی دعوت‌ها"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            WITH RECURSIVE referral_tree AS (
+                SELECT 
+                    id,
+                    full_name,
+                    phone,
+                    inviter_id,
+                    0 AS level
+                FROM users
+                WHERE id = %s
+
+                UNION ALL
+
+                SELECT 
+                    u.id,
+                    u.full_name,
+                    u.phone,
+                    u.inviter_id,
+                    rt.level + 1
+                FROM users u
+                INNER JOIN referral_tree rt ON u.inviter_id = rt.id
+            )
+            SELECT * FROM referral_tree
+            ORDER BY level ASC
+        """, (user_id,))
+
+        return cursor.fetchall()
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def format_referral_tree(tree_data):
+    """قالب‌بندی درخت دعوت به صورت متن سلسله مراتبی"""
+    try:
+        tree = {}
+        for item in tree_data:
+            tree.setdefault(item['inviter_id'], []).append(item)
+
+        def build_branch(parent_id, level=0):
+            branch = []
+            for child in tree.get(parent_id, []):
+                prefix = "│   " * (level - 1) + "├── " if level > 0 else ""
+                branch.append(f"{prefix}👤 {child['full_name']} ({child['phone']})")
+                branch.extend(build_branch(child['id'], level + 1))
+            return branch
+
+        return "\n".join(build_branch(None))
+
+    except Exception as e:
+        logger.error(f"خطا در فرمت‌بندی: {e}")
+        return "خطا در نمایش ساختار"
+
+
+# ----------------------
+# توابع مدیریت مدعوین
+# ----------------------
+def get_direct_invites(user_id):
+    """دریافت لیست مدعوین مستقیم با جزئیات"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT 
+                invited_full_name AS name,
+                invited_phone AS phone,
+                DATE_FORMAT(invited_at, '%%Y/%%m/%%d') AS date
+            FROM invited_users 
+            WHERE referrer_id = %s
+            ORDER BY invited_at DESC
+        """, (user_id,))
+
+        return cursor.fetchall()
+
+    except mysql.connector.Error as e:
+        logger.error(f"خطای دیتابیس: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+if __name__ == "__main__":
+    create_tables()  # این خط باید وجود داشته باشد
+
+==================================================
+# فایل: keyboards.py
+==================================================
+
+from telegram import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
+import database
+
+# کیبورد کاربران
+# کیبورد پایه بدون نمایش تعداد
+# کیبورد کاربران
+# فایل keyboards.py
+customer_kb = ReplyKeyboardMarkup(
+    [
+        ["📂 آرشیو", "🔄 درحال انجام"],
+        ["💳 کیف پول", "📞 پشتیبانی"],
+        ["📜 قوانین", "🧾 فاکتور"],
+        ["🎁 دریافت هدیه", "👥 مدعوین من"] # اضافه شدن دکمه جدید
+    ],
+    resize_keyboard=True,
+    is_persistent=True
+)
+
+archive_reply_kb = ReplyKeyboardMarkup(
+    [
+        ["🕒 هفته اخیر", "📅 ماه اخیر"],
+        ["📂 کل آرشیو", "🔙 برگشت"]
+    ],
+    resize_keyboard=True,
+    is_persistent=True
+)
+
+# کیبورد ادمین باید دقیقاً همین متن را داشته باشد
+admin_kb = ReplyKeyboardMarkup(
+    [
+        ["🔗 تولید لینک دعوت نامحدود"],
+        ["👥 لیست مشتریان", "📊 آمار سیستم"],
+        ["🌳 نمایش درخت دعوت"]  # دکمه جدید
+    ],
+    resize_keyboard=True
+)
+
+def get_qty_keyboard(current_qty=1):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("-", callback_data="qty_down"),
+            InlineKeyboardButton(str(current_qty), callback_data="noop"),
+            InlineKeyboardButton("+", callback_data="qty_up")
+        ],
+        [
+            InlineKeyboardButton("تأیید ✅", callback_data="qty_confirm"),
+            InlineKeyboardButton("لغو ↩️", callback_data="qty_cancel")
+        ]
+    ])
+
+# کیبورد کیف پول
+wallet_kb = ReplyKeyboardMarkup(
+    [
+        ["💵 موجودی کیف", "🎫 اعتبار تخفیف"],
+        ["🔙 برگشت"]
+    ],
+    resize_keyboard=True
+)
+#
+# فایل: database.py
+# ...
+
+def get_customer_kb(user_id):
+    """تهیه کیبورد مشتری با نمایش تعداد سفارشات فعال"""
+    active_orders = database.get_active_orders_count(user_id)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            ["📂 آرشیو", f"🔄 درحال انجام ({active_orders})"],
+            ["💳 کیف پول", "📞 پشتیبانی"],
+            ["📜 قوانین", "🧾 فاکتور"],
+            ["🎁 دریافت هدیه", "👥 مدعوین من"]  # اضافه شدن دکمه جدید
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+==================================================
+# فایل: m.py
+==================================================
+
+
+
+==================================================
+# فایل: main.py
+==================================================
+
+import os
+from telegram.ext import CallbackQueryHandler
+import keyboards  # <--- این خط را اضافه کنید
+from telegram.ext import Application as TgApplication
+
+from telegram.ext import (
+
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    MessageHandler,
+    filters
+)
+
+import database
+
+from handlers.admin_handlers import admin_generate_referral, show_referral_tree
+from handlers.file_handlers import (
+    handle_files,
+    handle_reply,  # اضافه شده
+    handle_callback
+)
+from handlers.user_handlers import (
+    FULL_NAME,
+    PHONE,
+    cancel_registration,
+    get_full_name,
+    get_phone,
+    handle_active_orders,
+    handle_archive,
+    show_archive,
+    start, generate_user_referral, handle_gift_request, show_direct_invites
+)
+import logging
+from dotenv import load_dotenv
+import os
+from handlers.admin_handlers import admin_generate_referral
+load_dotenv()
+ADMINS = [2138687434]  # آیدی ادمین اصلی را اینجا وارد کنید
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME'),
+    'charset': 'utf8mb4'
+}
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG  # تغییر به DEBUG برای نمایش تمام لاگ‌ها
+)
+# غیرفعال کردن لاگ‌های کتابخانه‌های خارجی
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+
+
+
+TOKEN = "7943645778:AAEXYzDKUc2D7mWaTcLrSkH4AjlJvVq7PaU"
+
+
+
+
+def main():
+    database.create_tables()
+
+    app = TgApplication.builder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_full_name)],
+            PHONE: [MessageHandler(filters.CONTACT | filters.TEXT & ~filters.COMMAND, get_phone)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_registration)],
+    )
+
+    app.add_handler(conv_handler)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.TEXT & filters.REPLY, handle_reply))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.Regex("📂 آرشیو"), show_archive))
+    app.add_handler(MessageHandler(filters.Regex("^(🕒 هفته اخیر|📅 ماه اخیر|📂 کل آرشیو)$"),handle_archive))
+    app.add_handler(MessageHandler(
+        filters.Regex(r"^🔄 درحال انجام(\(\d+\))?$"),  # قبول هر دو فرمت با و بدون عدد
+        handle_active_orders
+    ))
+    # تغییر قسمت اضافه کردن هندلر
+    app.add_handler(MessageHandler(filters.Regex("🔗 تولید لینک دعوت نامحدود"), admin_generate_referral))
+    app.add_handler(CallbackQueryHandler(handle_callback))  # اضافه کردن هندلر
+    # به لیست handlers اضافه کنید:
+
+    # در بخش اضافه کردن هندلرها:
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🎁 دریافت هدیه$"),  # مطمئن شوید متن دکمه دقیقاً همین باشد
+            generate_user_referral
+        )
+    )
+    app.add_handler(MessageHandler(filters.Regex("🌳 نمایش درخت دعوت"), show_referral_tree))
+    app.add_handler(MessageHandler(filters.Regex("^👥 مدعوین من$"), show_direct_invites))
+    # در تابع main یا جایی که هندلرها ثبت می‌شوند:
+    app.add_handler(
+        CommandHandler(
+            "gen_ref",
+            admin_generate_referral,
+            filters=filters.User(user_id=ADMINS)  # استفاده از لیست ADMINS
+        )
+    )
+
+    app.run_polling()
+
+
+#
+if __name__ == "__main__":
+    main()
+
+==================================================
+# فایل: test.py
+==================================================
+
+# database_test.py
+from database import (
+    create_tables,
+    add_user,
+    create_referral,
+    validate_referral,
+    add_file,
+    get_user,
+    get_active_orders_count,
+    delete_file,
+    get_db_connection
+)
+from datetime import datetime
+import mysql.connector
+
+
+# ----------------------
+# توابع کمکی برای تست
+# ----------------------
+def print_test_result(test_name, success):
+    status = "✅ موفق" if success else "❌ شکست"
+    print(f"{status} | تست: {test_name}")
+
+
+# ----------------------
+# تست‌های واحد
+# ----------------------
+def test_db_connection():
+    """تست اتصال به دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        print_test_result("اتصال به دیتابیس", True)
+    except Exception as e:
+        print_test_result("اتصال به دیتابیس", False)
+        print(f"خطا: {e}")
+
+
+def test_create_tables():
+    """تست ایجاد جداول"""
+    try:
+        create_tables()
+        print_test_result("ایجاد جداول", True)
+    except Exception as e:
+        print_test_result("ایجاد جداول", False)
+        print(f"خطا: {e}")
+
+
+def test_user_flow():
+    """تست کامل چرخه کاربر"""
+    test_user_id = 999888777
+    test_phone = "+989121234567"
+    success = True
+
+    try:
+        # حذف کاربر تستی اگر وجود دارد
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"DELETE FROM users WHERE id = {test_user_id}")
+        conn.commit()
+
+        # ۱. ثبت کاربر جدید
+        user_data = (
+            test_user_id,
+            "کاربر تستی",
+            test_phone,
+            None
+        )
+        add_user(user_data)
+
+        # ۲. بررسی وجود کاربر
+        user = get_user(test_user_id)
+        if not user:
+            raise Exception("کاربر ایجاد نشد")
+
+        # ۳. ایجاد کد دعوت
+        code, error = create_referral(test_user_id)
+        if not code:
+            raise Exception("خطا در ایجاد کد دعوت")
+
+        # ۴. اعتبارسنجی کد
+        is_valid, referrer = validate_referral(code)
+        if not is_valid:
+            raise Exception("کد نامعتبر")
+
+        # ۵. افزودن فایل
+        file_data = (
+            test_user_id,
+            "test.stl",
+            "application/stl",
+            "FILE_TEST_123",
+            "UNIQUE_TEST_123",
+            datetime.now(),
+            3,
+            "توضیحات تست",
+            "در حال انجام",
+            ""
+        )
+        add_file(file_data)
+
+        # ۶. بررسی تعداد سفارشات
+        count = get_active_orders_count(test_user_id)
+        if count != 1:
+            raise Exception("مشکل در شمارش سفارشات")
+
+        print_test_result("چرخه کامل کاربر", True)
+
+    except Exception as e:
+        print_test_result("چرخه کامل کاربر", False)
+        print(f"خطا: {e}")
+        success = False
+
+    finally:
+        # پاکسازی داده‌های تست
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM files WHERE user_id = {test_user_id}")
+            cursor.execute(f"DELETE FROM users WHERE id = {test_user_id}")
+            conn.commit()
+        except:
+            pass
+
+        return success
+
+
+# ----------------------
+# اجرای تمام تست‌ها
+# ----------------------
+if __name__ == "__main__":
+    print("\nشروع تست‌ها...\n")
+
+    test_db_connection()
+    test_create_tables()
+    test_user_flow()
+
+    print("\nپایان تست‌ها")
+
+==================================================
+# فایل: handlers\admin_handlers.py
+==================================================
+
+from telegram import Update
+from telegram.ext import ContextTypes
+import database
+from config import Config
+from database import create_referral, is_admin
+
+from config import Config
+from database import create_referral, is_admin
+import logging
+logger = logging.getLogger(__name__)
+
+async def admin_generate_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        if not is_admin(user.id):
+            await update.message.reply_text("❌ فقط ادمین‌ها می‌توانند کد تولید کنند!")
+            return
+
+        code = create_referral(
+            user_id=user.id,
+            is_admin=True,
+            code_length=Config.REFERRAL_CODE_LENGTH,
+            prefix=Config.ADMIN_CODE_PREFIX
+        )
+
+        await update.message.reply_text(
+            f"✅ کد دعوت ادمین:\n`{code}`\n"
+            f"⏳ اعتبار: 1 سال\n"
+            f"👥 تعداد استفاده نامحدود",
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.error(f"ADMIN_REF_ERROR: {str(e)}")
+        await update.message.reply_text("🔥 خطای سیستمی! لطفا لاگ‌ها را بررسی کنید.")
+
+
+async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != database.ADMIN_ID:
+        return
+
+    users = database.get_all_users()
+
+    response = "👥 لیست کاربران:\n\n"
+    for user in users:
+        response += f"🆔 {user[0]} - 📞 {user[2]}\n"
+
+    await update.message.reply_text(response)
+
+
+async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != database.ADMIN_ID:
+        return
+
+    try:
+        tree_data = database.get_referral_tree(database.ADMIN_ID)
+        if not tree_data:
+            await update.message.reply_text("ℹ️ هیچ ساختار دعوتی وجود ندارد.")
+            return
+
+        formatted_tree = database.format_referral_tree(tree_data)
+
+        # ارسال به صورت کد برای حفظ فرمت
+        await update.message.reply_text(
+            f"🌳 ساختار درختی دعوت‌ها:\n\n"
+            f"<code>{formatted_tree}</code>",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        print(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در نمایش درخت دعوت")
+
+==================================================
+# فایل: handlers\file_handlers.py
+==================================================
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from datetime import datetime
+import database
+import keyboards
+from keyboards import get_qty_keyboard
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not database.get_user(user.id):
+        await update.message.reply_text("❌ لطفاً ابتدا ثبت نام کنید!")
+        return
+
+    doc = update.message.document
+    file_data = (
+        user.id,
+        doc.file_name,
+        doc.mime_type,
+        doc.file_id,
+        doc.file_unique_id,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        1,
+        "فاقد توضیحات",
+        "در حال انجام",
+        ""
+    )
+
+    if not database.add_file(file_data):
+        await update.message.reply_text("❌ خطا در ذخیره فایل!")
+        return
+
+    # کیبورد اصلاح شده
+    keyboard = [
+        [
+            InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")
+        ],
+        [
+            InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")
+        ]
+    ]
+
+    await update.message.reply_document(
+        document=doc.file_id,
+        caption=f"""⏰ زمان تحویل: تعیین نشده
+🧮 تعداد: 1
+📝 توضیحات: فاقد توضیحات
+📌 برای افزودن توضیحات، روی پیام ریپلای کنید""",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    message = query.message
+
+    try:
+        logger.debug(f"Callback data received: {data}")
+
+        # دریافت file_id از پیام اصلی
+        if not message.document:
+            logger.error("No document found in the message!")
+            return
+
+        file_id = message.document.file_id
+        logger.info(f"Processing file ID: {file_id}")
+
+        # مدیریت انواع callback
+        if data == "edit_qty":
+            current_qty = database.get_file_quantity(file_id)
+            await message.edit_reply_markup(
+                reply_markup=keyboards.get_qty_keyboard(current_qty)
+            )
+
+        elif data in ("qty_up", "qty_down"):
+            current_qty = int(message.reply_markup.inline_keyboard[0][1].text)
+
+            if data == "qty_up":
+                new_qty = current_qty + 1
+            else:
+                new_qty = max(1, current_qty - 1)
+
+            # آپدیت کیبورد
+            await message.edit_reply_markup(
+                reply_markup=keyboards.get_qty_keyboard(new_qty)
+            )
+
+        elif data == "qty_confirm":
+            final_qty = int(message.reply_markup.inline_keyboard[0][1].text)
+            if database.update_file_quantity(file_id, final_qty):
+                # آپدیت کپشن
+                new_caption = message.caption.split('\n')
+                new_caption[1] = f"🧮 تعداد: {final_qty}"
+                await message.edit_caption(
+                    caption="\n".join(new_caption),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")],
+                        [InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")]
+                    ])
+                )
+            else:
+                await query.answer("❌ خطا در بروزرسانی تعداد!")
+
+        elif data == "qty_cancel":
+            await message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")],
+                    [InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")]
+                ])
+            )
+
+        elif data == "cancel_file":
+            await message.delete()
+            database.delete_file(file_id)  # نیاز به پیاده‌سازی تابع delete_file در دیتابیس
+
+    except Exception as e:
+        logger.error(f"Error in callback handler: {str(e)}", exc_info=True)
+        await query.answer("⚠️ خطای سیستمی رخ داد!")
+
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+import database
+
+async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت پاسخ به پیام‌های ریپلای شده"""
+    if not update.message.reply_to_message.document:
+        return
+
+    user = update.effective_user
+    file_id = update.message.reply_to_message.document.file_id
+    description = update.message.text.strip()
+
+    # آپدیت توضیحات در دیتابیس
+    if database.update_file_description(file_id, description):
+        # آپدیت کپشن پیام
+        new_caption = f"""
+⏰ زمان تحویل: تعیین نشده
+🧮 تعداد: {database.get_file_quantity(file_id)}
+📝 توضیحات: {description}
+        """.strip()
+
+        keyboard = [
+            [InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")],
+            [InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")]
+        ]
+
+        await update.message.reply_to_message.edit_caption(
+            caption=new_caption,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        await update.message.reply_text("✅ توضیحات با موفقیت ذخیره شد!")
+    else:
+        await update.message.reply_text("❌ خطا در ذخیره توضیحات!")
+
+
+==================================================
+# فایل: handlers\user_handlers.py
+==================================================
+
+from telegram import Update, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
+from telegram.ext import ContextTypes, ConversationHandler
+from datetime import datetime
+import database
+import keyboards
+from keyboards import customer_kb, admin_kb, wallet_kb, archive_reply_kb
+from jdatetime import datetime as jdatetime
+
+import logging
+import sqlite3
+logger = logging.getLogger(__name__)
+
+# تنظیم سطح لاگ
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG
+)
+ADMIN_ID = 2138687434
+FULL_NAME, PHONE = range(2)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args
+
+    # اگر کاربر ادمین است و در جدول وجود ندارد، ثبت شود
+    if user.id == database.ADMIN_ID and not database.get_user(user.id):
+        user_data = (
+            user.id,
+            "ادمین",  # نام کامل ادمین
+            "بدون شماره",  # شماره تماس (اختیاری)
+            None,  # inviter_id برای ادمین None است
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        database.add_user(user_data)
+
+    # اگر ادمین باشد
+    if user.id == ADMIN_ID:
+        await update.message.reply_text("👑 پنل مدیریتی فعال شد!", reply_markup=admin_kb)
+        return ConversationHandler.END
+
+    # بررسی ثبت‌نام قبلی
+    if database.get_user(user.id):
+        await update.message.reply_text("✅ قبلاً ثبت نام کرده‌اید!")
+        return ConversationHandler.END
+
+    # استخراج کد رفرال
+    referral_code = None
+    if args:
+        for arg in args:
+            if arg.startswith("ref_"):
+                referral_code = arg[4:]
+                break
+
+    if not referral_code:
+        await update.message.reply_text("🔒 دسترسی فقط از طریق لینک دعوت ممکن است!")
+        return ConversationHandler.END
+
+    context.user_data["referral_code"] = referral_code
+    await update.message.reply_text("👤 لطفاً نام کامل خود را وارد کنید:")
+    return FULL_NAME
+
+
+
+async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["full_name"] = update.message.text
+    await update.message.reply_text(
+        "📱 لطفاً شماره تماس خود را ارسال کنید:",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("ارسال شماره 📲", request_contact=True)]],
+            resize_keyboard=True
+        )
+    )
+    return PHONE
+
+
+async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        # دریافت شماره تماس
+        if update.message.contact:
+            phone = update.message.contact.phone_number
+        else:
+            phone = update.message.text.strip()
+            if not phone.startswith('+'):
+                phone = f"+98{phone[-10:]}"  # فرمت ایران
+
+        # اعتبارسنجی نهایی کد رفرال
+        referral_code = context.user_data.get("referral_code")
+        is_valid, referrer_id = database.validate_referral(referral_code)
+
+        if not is_valid:
+            await update.message.reply_text(f"❌ {referrer_id}")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        # آماده‌سازی داده‌های کاربر
+        user_data = (
+            user.id,
+            context.user_data["full_name"],
+            phone,
+            referrer_id,  # inviter_id از کد رفرال
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+
+        # ذخیره کاربر جدید
+        if database.add_user(user_data):
+            # ثبت مدعو در لیست دعوت‌کننده
+            invited_user_data = (
+                user.id,
+                context.user_data["full_name"],
+                phone,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+            # افزودن به جدول مدعوین
+            success = database.add_invited_user(
+                referrer_id=referrer_id,
+                user_data=invited_user_data
+            )
+
+            if not success:
+                logging.error(f"خطا در ثبت مدعو برای کاربر {user.id}")
+
+            # کاهش تعداد دعوت‌های باقی‌مانده (اگر کاربر عادی باشد)
+            if referrer_id != database.ADMIN_ID:
+                database.decrement_invites(referrer_id)
+                database.add_discount(referrer_id, 50)
+
+            # علامت‌گذاری کد رفرال به عنوان استفاده شده
+            database.mark_referral_used(referral_code, user.id)
+
+            await update.message.reply_text(
+                "✅ ثبت نام موفق! لطفا از منوی زیر استفاده کنید:",
+                reply_markup=keyboards.customer_kb
+            )
+        else:
+            await update.message.reply_text("❌ خطا در ثبت اطلاعات کاربر!")
+
+    except sqlite3.IntegrityError:
+        await update.message.reply_text("❌ این شماره قبلاً ثبت شده است!")
+    except Exception as e:
+        logging.exception(f"🔥 خطای بحرانی: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدد تلاش کنید.")
+    finally:
+        context.user_data.clear()
+        return ConversationHandler.END
+
+
+async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "بازه زمانی مورد نظر را انتخاب کنید:",
+        reply_markup=archive_reply_kb
+    )
+
+
+async def handle_active_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    active_orders = database.get_active_orders(user.id)
+
+    if not active_orders:
+        await update.message.reply_text("✅ هیچ سفارش فعالی ندارید!")
+        return
+
+    response = "📋 سفارشات فعال شما:\n\n"
+    for order in active_orders:
+        response += f"""🔖 شماره سفارش: {order[0]}
+📁 فایل: {order[2]}
+🧮 تعداد: {order[7]}
+⏳ وضعیت: {order[9]}
+➖➖➖➖➖➖➖\n"""
+
+    await update.message.reply_text(response)
+
+async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """لغو فرایند ثبت نام"""
+    await update.message.reply_text(
+        "❌ ثبت نام لغو شد.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+
+    days = None
+    if text == "🕒 هفته اخیر":
+        days = 7
+    elif text == "📅 ماه اخیر":
+        days = 30
+
+    files = database.get_files_by_user(user.id, days)
+
+    if not files:
+        await update.message.reply_text(
+            "❌ هیچ فایلی در این بازه زمانی یافت نشد!",
+            reply_markup=customer_kb
+        )
+        return
+
+    for file in files:
+        miladi_date = datetime.strptime(file[6], "%Y-%m-%d %H:%M:%S")
+        shamsi_date = jdatetime.fromgregorian(datetime=miladi_date)
+
+        caption = f"""
+📁 نام فایل: {file[2]}
+📅 تاریخ ارسال: 
+  شمسی: {shamsi_date.strftime("%Y/%m/%d")}
+  میلادی: {miladi_date.strftime("%Y/%m/%d")}
+🧮 تعداد: {file[7]}
+📝 توضیحات: {file[8]}
+        """.strip()
+
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=file[4],
+            caption=caption
+        )
+
+    await update.message.reply_text(
+        "✅ فایل‌های شما ارسال شدند!",
+        reply_markup=customer_kb
+    )
+
+
+async def generate_user_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        logger.info(f"درخواست لینک دعوت از کاربر {user.id}")
+
+        # بررسی وجود کاربر در دیتابیس
+        if not database.get_user(user.id):
+            await update.message.reply_text("❌ لطفاً ابتدا ثبت نام کنید!")
+            return
+
+        # دریافت تعداد دعوت‌های باقی‌مانده
+        remaining = database.get_remaining_invites(user.id)
+        if remaining <= 0:
+            await update.message.reply_text("❌ ظرفیت دعوت شما تکمیل شده است!")
+            return
+
+        # تولید کد رفرال جدید
+        code, error = database.create_referral(user.id, is_admin=False)
+        if error:
+            await update.message.reply_text(f"❌ {error}")
+            return
+
+        # ساخت لینک دعوت با فرمت صحیح
+        bot = await context.bot.get_me()
+        referral_link = f"https://t.me/{bot.username}?start=ref_{code}"
+
+        # ارسال پاسخ با فرمت HTML برای هایپرلینک
+        await update.message.reply_text(
+            f"🎉 <b>لینک دعوت شما:</b>\n"
+            f"<a href='{referral_link}'>کلیک کنید برای دعوت</a>\n\n"
+            f"🔢 تعداد دعوت باقی‌مانده: <b>{remaining}</b>\n"
+            "⚠️ توجه: کاربر باید مستقیم روی لینک بالا کلیک کند!",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+        logger.info(f"لینک دعوت برای کاربر {user.id} تولید شد: {code}")
+
+    except Exception as e:
+        logger.error(f"خطا در تولید لینک دعوت: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+
+
+async def handle_gift_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        logger.debug(f"شروع پردازش درخواست هدیه برای کاربر {user.id}")
+
+        # لاگ اطلاعات کاربر
+        user_data = database.get_user(user.id)
+        logger.debug(f"اطلاعات کاربر: {user_data}")
+
+        # بررسی شرایط
+        logger.debug("بررسی شرایط دریافت هدیه")
+        if database.meets_gift_conditions(user.id):
+            logger.debug("کاربر واجد شرایط است")
+
+            # افزودن اعتبار
+            logger.debug("در حال افزودن اعتبار...")
+            if database.add_discount(user.id, 100):
+                logger.debug("اعتبار با موفقیت افزوده شد")
+                await update.message.reply_text("🎉 100 دلار اعتبار هدیه دریافت کردید!")
+            else:
+                logger.error("خطا در افزودن اعتبار")
+                await update.message.reply_text("❌ خطا در اعطای هدیه!")
+
+        else:
+            logger.debug("کاربر واجد شرایط نیست")
+            await update.message.reply_text("⚠️ شما شرایط دریافت هدیه را ندارید.")
+
+    except Exception as e:
+        logger.exception(f"خطای بحرانی: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً بعداً تلاش کنید.")
+
+
+# user_handlers.py
+# فایل handlers/user_handlers.py
+async def show_direct_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        invites = database.get_direct_invites(user.id)
+
+        if not invites:
+            await update.message.reply_text("ℹ️ هنوز کسی را دعوت نکرده‌اید!")
+            return
+
+        response = "📋 لیست مدعوین مستقیم شما:\n\n"
+        for idx, invite in enumerate(invites, 1):
+            response += (
+                f"{idx}. 👤 {invite['invited_full_name']}\n"
+                f"   📞 {invite['invited_phone']}\n"
+                f"   📅 {invite['invited_date']}\n\n"
+            )
+
+        await update.message.reply_text(response)
+
+    except Exception as e:
+        logging.error(f"خطا در نمایش مدعوین: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی!")
