@@ -43,6 +43,8 @@ def generate_referral_code(is_admin: bool = False) -> str:
     suffix = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
     return f"{prefix}{suffix}"
 
+
+
 # ----------------------
 # ایجاد جداول (بهینه‌سازی شده برای MySQL)
 # ----------------------
@@ -102,19 +104,17 @@ def create_referral(db: Session, user_id: int, is_admin: bool = False) -> str:
 # توابع اعتبارسنجی رفرال
 # ----------------------
 def validate_referral(db, code: str):
-    try:
-        referral = db.query(Referral).filter(
-            Referral.referral_code == code,
-            Referral.used_by == None,
-            Referral.expires_at > datetime.now()
-        ).first()
+    referral = db.query(Referral).filter(
+        Referral.referral_code == code,
+        Referral.expires_at > datetime.now(),
+        (Referral.usage_limit == -1) | (Referral.usage_limit > 0)
+    ).first()
 
-        if not referral:
-            return False, "کد دعوت نامعتبر یا منقضی شده است"
+    if referral:
+        if referral.usage_limit > 0:
+            referral.usage_limit -= 1
         return True, referral.referrer_id
-    except SQLAlchemyError as e:
-        logger.error(f"خطای اعتبارسنجی رفرال: {str(e)}")
-        return False, "خطای سیستمی"
+    return False, "کد نامعتبر"
 
 
 # ----------------------

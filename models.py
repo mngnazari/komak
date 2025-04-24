@@ -62,13 +62,15 @@ class File(Base):
 
 class Referral(Base):
     __tablename__ = 'referrals'
+
     id = Column(Integer, primary_key=True)
     referrer_id = Column(Integer, ForeignKey('users.id'))
-    referral_code = Column(String(50), unique=True)
+    referral_code = Column(String(20), unique=True)
     used_by = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
     expires_at = Column(DateTime)
     is_admin = Column(Boolean, default=False)
+    usage_limit = Column(Integer, default=-1)  # -1 برای نامحدود
     referrer = relationship("User", back_populates="referrals")
 
 

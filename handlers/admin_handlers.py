@@ -11,45 +11,60 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from telegram import Update
+from telegram.ext import ContextTypes
+from models import SessionLocal, Referral
+from config import Config
+import secrets
+import string
+from datetime import datetime, timedelta
+
+# در handlers/admin_handlers.py
+from utils import generate_referral_link
+
 
 async def admin_generate_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
         with SessionLocal() as db:
+            # احراز هویت ادمین
             if not is_admin(user.id):
                 await update.message.reply_text("❌ دسترسی غیرمجاز!")
                 return
 
-            code = None
-            attempts = 0
-            while not code and attempts < 10:
-                try:
-                    code = f"ADMIN_{''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))}"
-                    new_referral = Referral(
-                        referrer_id=user.id,
-                        referral_code=code,
-                        is_admin=True,
-                        expires_at=datetime.now() + timedelta(days=365)
-                    )
-                    db.add(new_referral)
-                    db.commit()
+            # تولید کد منحصر به فرد
+            code = f"ADMIN_{secrets.token_urlsafe(8)}"
+            while db.query(Referral).filter_by(referral_code=code).first():
+                code = f"ADMIN_{secrets.token_urlsafe(8)}"
 
-                    await update.message.reply_text(
-                        f"✅ کد دعوت ادمین ایجاد شد:\n`{code}`",
-                        parse_mode="Markdown"
-                    )
-                    return
+            # ایجاد لینک دعوت
+            bot = await context.bot.get_me()
+            invite_link = generate_referral_link(bot.username, code)
 
-                except IntegrityError:
-                    db.rollback()
-                    code = None
-                    attempts += 1
+            # ذخیره در دیتابیس
+            new_ref = Referral(
+                referrer_id=user.id,
+                referral_code=code,
+                expires_at=datetime.now() + timedelta(days=365),
+                is_admin=True,
+                usage_limit=-1  # نامحدود
+            )
 
-            await update.message.reply_text("❌ خطا در تولید کد دعوت")
+            db.add(new_ref)
+            db.commit()
+
+            # ارسال پیام
+            msg = (
+                "🔗 لینک دعوت ادمین:\n"
+                f"{invite_link}\n"
+                "⏳ اعتبار: 1 سال\n"
+                "👥 تعداد استفاده: نامحدود"
+            )
+            await update.message.reply_text(msg)
 
     except Exception as e:
-        logger.error(f"خطا در تولید کد دعوت: {str(e)}", exc_info=True)
-        await update.message.reply_text("❌ خطای سیستمی!")
+        logger.error(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در تولید لینک!")
 
 
 async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
