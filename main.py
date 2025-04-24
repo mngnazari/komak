@@ -39,8 +39,9 @@ from dotenv import load_dotenv
 import os
 from handlers.admin_handlers import admin_generate_referral
 from models import Base, engine
-Base.metadata.drop_all(bind=engine)  # حذف جداول قدیمی
-Base.metadata.create_all(bind=engine)  # ایجاد جدید
+
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
 
 load_dotenv()
 ADMINS = [2138687434]  # آیدی ادمین اصلی را اینجا وارد کنید

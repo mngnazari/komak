@@ -39,6 +39,7 @@ class User(Base):
     referrals = relationship("Referral", back_populates="referrer")
     invited_users = relationship("InvitedUser", foreign_keys="[InvitedUser.referrer_id]", back_populates="referrer")
     wallet = relationship("Wallet", uselist=False, back_populates="user")
+    referrals = relationship("Referral", back_populates="referrer")
 
 
 class File(Base):
@@ -61,15 +62,13 @@ class File(Base):
 
 class Referral(Base):
     __tablename__ = 'referrals'
-
     id = Column(Integer, primary_key=True)
-    referrer_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    referral_code = Column(String(50), unique=True, nullable=False)
+    referrer_id = Column(Integer, ForeignKey('users.id'))
+    referral_code = Column(String(50), unique=True)
     used_by = Column(Integer)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=datetime.now)
     expires_at = Column(DateTime)
     is_admin = Column(Boolean, default=False)
-
     referrer = relationship("User", back_populates="referrals")
 
 
@@ -108,6 +107,7 @@ class Wallet(Base):
 
 Index('ix_referrals_code', Referral.referral_code)
 Index('ix_files_created_at', File.created_at)
+Index('ix_referrals_expires', Referral.expires_at)
 
 # Database engine configuration
 engine = create_engine(

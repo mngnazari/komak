@@ -26,12 +26,13 @@ def get_db_connection():
         connect_timeout = 30
     )
 
-def is_admin(db, user_id: int) -> bool:
+def is_admin(user_id: int) -> bool:
     try:
-        user = db.query(User).get(user_id)
-        return user.is_admin if user else False
-    except SQLAlchemyError as e:
-        logger.error(f"خطای بررسی ادمین: {str(e)}")
+        with SessionLocal() as db:
+            user = db.query(User).get(user_id)
+            return user.is_admin if user else False
+    except Exception as e:
+        logger.error(f"خطا در بررسی ادمین: {str(e)}")
         return False
 
 # ----------------------
