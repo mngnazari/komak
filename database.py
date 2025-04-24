@@ -103,18 +103,33 @@ def create_referral(db: Session, user_id: int, is_admin: bool = False) -> str:
 # ----------------------
 # توابع اعتبارسنجی رفرال
 # ----------------------
-def validate_referral(db, code: str):
-    referral = db.query(Referral).filter(
-        Referral.referral_code == code,
-        Referral.expires_at > datetime.now(),
-        (Referral.usage_limit == -1) | (Referral.usage_limit > 0)
-    ).first()
+def validate_referral(db: Session, code: str):
+    try:
+        referral = db.query(Referral).filter(
+            Referral.referral_code == code,
+            Referral.is_active == True,
+            Referral.used_count < Referral.max_uses,
+            Referral.expires_at > datetime.now()
+        ).first()
 
-    if referral:
-        if referral.usage_limit > 0:
-            referral.usage_limit -= 1
+        if not referral:
+            return False, "کد نامعتبر یا منقضی شده"
+
+        # افزایش شمارنده استفاده
+        referral.used_count += 1
+        if referral.used_count >= referral.max_uses:
+            referral.is_active = False
+
+        # افزودن اعتبار
+        referrer = db.query(User).get(referral.referrer_id)
+        referrer.total_earned += 50  # 50 دلار جایزه
+        db.commit()
+
         return True, referral.referrer_id
-    return False, "کد نامعتبر"
+
+    except Exception as e:
+        logger.error(f"خطای اعتبارسنجی: {str(e)}")
+        return False, "خطای سیستمی"
 
 
 # ----------------------
@@ -252,41 +267,22 @@ def decrement_invites(user_id):
 # ----------------------
 # توابع کاربران (تکمیلی)
 # ----------------------
-def get_user(user_id):
-    """دریافت اطلاعات کاربر با فرمت دیکشنری"""
-    conn = None
-    cursor = None
+def add_user(user_data: dict) -> bool:
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with SessionLocal() as db:
+            new_user = User(**user_data)
+            db.add(new_user)
 
-        cursor.execute('''
-            SELECT 
-                u.*,
-                w.balance,
-                w.discount
-            FROM users u
-            LEFT JOIN wallets w ON u.id = w.user_id
-            WHERE u.id = %s
-        ''', (user_id,))
+            # ایجاد کیف پول برای کاربر جدید
+            wallet = Wallet(user_id=user_data['id'])
+            db.add(wallet)
 
-        result = cursor.fetchone()
-        if result:
-            # تبدیل مقادیر عددی به نوع صحیح
-            result['remaining_invites'] = int(result['remaining_invites'])
-            result['balance'] = float(result['balance'])
-            result['discount'] = float(result['discount'])
-
-        return result
-
-    except mysql.connector.Error as e:
-        logger.error(f"خطای دیتابیس در دریافت کاربر: {e}")
-        return None
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"خطا در افزودن کاربر: {str(e)}")
+        db.rollback()
+        return False
 
 
 # ----------------------
@@ -643,36 +639,27 @@ def add_discount(user_id, amount):
             conn.close()
 
 
-def meets_gift_conditions(user_id):
-    """بررسی شرایط دریافت هدیه"""
-    conn = None
-    cursor = None
+def meets_gift_conditions(db: Session, user_id: int) -> bool:
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        # شرایط دریافت هدیه:
+        # 1. حداقل 3 سفارش تکمیل شده در 3 ماه گذشته
+        # 2. مجموع تعداد محصولات حداقل 10 عدد
+        three_months_ago = datetime.now() - timedelta(days=90)
 
-        cursor.execute("""
-            SELECT 
-                COUNT(*) AS total_completed,
-                SUM(quantity) AS total_quantity
-            FROM files 
-            WHERE 
-                user_id = %s 
-                AND status = 'تکمیل شده'
-                AND created_at >= DATE_SUB(NOW(), INTERVAL 3 MONTH)
-        """, (user_id,))
+        orders = db.query(File).filter(
+            File.user_id == user_id,
+            File.status == 'تکمیل شده',
+            File.created_at >= three_months_ago
+        ).all()
 
-        result = cursor.fetchone()
-        return result['total_completed'] >= 3 and result['total_quantity'] >= 10
+        total_completed = len(orders)
+        total_quantity = sum(order.quantity for order in orders)
 
-    except mysql.connector.Error as e:
-        logger.error(f"خطای دیتابیس: {e}")
+        return total_completed >= 3 and total_quantity >= 10
+
+    except Exception as e:
+        logger.error(f"خطا در بررسی شرایط هدیه: {str(e)}")
         return False
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
 def get_completed_orders(user_id):
@@ -778,6 +765,17 @@ def format_referral_tree(tree_data):
     except Exception as e:
         logger.error(f"خطا در فرمت‌بندی: {e}")
         return "خطا در نمایش ساختار"
+
+def add_purchase_commission(db: Session, user_id: int, amount: float):
+    try:
+        user = db.query(User).get(user_id)
+        if user.inviter_id:
+            referrer = db.query(User).get(user.inviter_id)
+            commission = amount * 0.05  # 5% کمیسیون
+            referrer.total_earned += commission
+            db.commit()
+    except Exception as e:
+        logger.error(f"خطای کمیسیون: {str(e)}")
 
 
 # ----------------------

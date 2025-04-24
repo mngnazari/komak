@@ -1,7 +1,8 @@
 services:
   mysql:
     image: mysql:8.0
-    command: 
+    container_name: komak-mysql
+    command:
       - --max_allowed_packet=256M
       - --wait_timeout=28800
       - --interactive_timeout=28800
@@ -17,3 +18,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: komak-phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: testuser
+      PMA_PASSWORD: testpass
+      UPLOAD_LIMIT: 256M
+    depends_on:
+      - mysql
+
+networks:
+  default:
+    name: komak_default

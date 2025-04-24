@@ -31,6 +31,8 @@ class User(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     is_admin = Column(Boolean, default=False)
+    remaining_invites = Column(Integer, default=5)  # دعوت‌های باقی‌مانده
+    total_earned = Column(DECIMAL(10,2), default=0.00)  # مجموع درآمد از رفرال
 
     # Relationships
     inviter = relationship("User", remote_side=[id], back_populates="invitees")
@@ -66,11 +68,12 @@ class Referral(Base):
     id = Column(Integer, primary_key=True)
     referrer_id = Column(Integer, ForeignKey('users.id'))
     referral_code = Column(String(20), unique=True)
-    used_by = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
     expires_at = Column(DateTime)
-    is_admin = Column(Boolean, default=False)
-    usage_limit = Column(Integer, default=-1)  # -1 برای نامحدود
+    max_uses = Column(Integer, default=1)  # تعداد مجاز استفاده
+    used_count = Column(Integer, default=0)  # تعداد استفاده شده
+    is_active = Column(Boolean, default=True)
+    is_admin_code = Column(Boolean, default=False)  # کد ادمین/کاربر عادی
     referrer = relationship("User", back_populates="referrals")
 
 

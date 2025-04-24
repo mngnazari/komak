@@ -6,10 +6,10 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
-
+from keyboards import customer_kb
 import database
 from keyboards import admin_kb, customer_kb
-from models import SessionLocal, User, Referral
+from models import SessionLocal, User, Referral, Wallet
 from sqlalchemy.exc import SQLAlchemyError
 from database import add_user, validate_referral, is_admin
 from config import Config
@@ -113,44 +113,65 @@ async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PHONE
 
 
+# فایل: handlers/user_handlers.py
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     try:
         with SessionLocal() as db:
-            # استخراج اطلاعات از context
-            phone = (
-                update.message.contact.phone_number
-                if update.message.contact
-                else update.message.text.strip()
-            )
+            # دریافت شماره تماس
+            if update.message.contact:
+                phone = update.message.contact.phone_number
+            else:
+                phone = update.message.text.strip()
 
+            # بررسی صحت شماره تماس
+            if not phone.startswith('+'):
+                phone = f"+98{phone[-10:]}"  # فرمت ایران
+
+            # آماده‌سازی داده کاربر
             user_data = {
-                'id': update.effective_user.id,
+                'id': user.id,
                 'full_name': context.user_data["full_name"],
                 'phone': phone,
                 'inviter_id': context.user_data["referrer_id"],
                 'is_admin': False
             }
 
+            # ذخیره کاربر در دیتابیس
             if add_user(user_data):
-                # علامت‌گذاری کد دعوت به عنوان استفاده شده
+                # بروزرسانی وضعیت کد رفرال
                 referral = db.query(Referral).filter(
                     Referral.referral_code == context.user_data["referral_code"]
                 ).first()
 
                 if referral:
-                    referral.used_by = user_data['id']
+                    referral.used_by = user.id
                     db.commit()
 
+                # ارسال پیام موفقیت با کیبورد مشتری
                 await update.message.reply_text(
-                    "✅ ثبت نام موفق!",
-                    reply_markup=customer_kb
+                    "✅ ثبت نام شما با موفقیت انجام شد!\n"
+                    "لطفاً از منوی زیر استفاده کنید:",
+                    reply_markup=customer_kb  # کیبورد مشتری
                 )
+
+                # کاهش تعداد دعوت‌های باقی‌مانده دعوت‌کننده
+                if referral and not referral.is_admin:
+                    inviter = db.query(User).get(referral.referrer_id)
+                    if inviter:
+                        inviter.remaining_invites -= 1
+                        db.commit()
             else:
                 await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
 
     except Exception as e:
-        logger.error(f"خطا در ثبت نام: {str(e)}", exc_info=True)
-        await update.message.reply
+        logger.error(f"خطای سیستمی در ثبت نام: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+
+    finally:
+        # پاکسازی داده‌های موقت
+        context.user_data.clear()
+        return ConversationHandler.END
 
 
 async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,31 +187,62 @@ async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     try:
-        phone = (
-            update.message.contact.phone_number
-            if update.message.contact
-            else update.message.text.strip()
-        )
-
-        user_data = {
-            'id': update.effective_user.id,
-            'full_name': context.user_data["full_name"],
-            'phone': phone,
-            'is_admin': False
-        }
-
-        if add_user(user_data):
-            await update.message.reply_text(
-                "✅ ثبت نام موفق!",
-                reply_markup=ReplyKeyboardMarkup([["منوی کاربری"]], resize_keyboard=True)
+        with SessionLocal() as db:
+            # دریافت شماره تماس
+            phone = (
+                update.message.contact.phone_number
+                if update.message.contact
+                else update.message.text.strip()
             )
-        else:
-            await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
+
+            # فرمت‌دهی شماره ایران
+            if not phone.startswith('+'):
+                phone = f"+98{phone[-10:]}"  # تبدیل به فرمت بین‌المللی
+
+            # دریافت کد رفرال از context
+            referral_code = context.user_data.get("referral_code")
+            referrer_id = None
+
+            # اعتبارسنجی کد رفرال
+            if referral_code:
+                valid, result = validate_referral(db, referral_code)
+                if valid:
+                    referrer_id = result
+                else:
+                    await update.message.reply_text(f"❌ {result}")
+                    return ConversationHandler.END
+
+            # ایجاد کاربر جدید
+            user_data = {
+                'id': user.id,
+                'full_name': context.user_data["full_name"],
+                'phone': phone,
+                'inviter_id': referrer_id,
+                'is_admin': False,
+                'remaining_invites': 5  # مقدار پیش‌فرض
+            }
+
+            if add_user(user_data):
+                # کاهش تعداد دعوت‌های باقی‌مانده دعوت‌کننده
+                if referrer_id:
+                    referrer = db.query(User).get(referrer_id)
+                    if referrer and not referrer.is_admin:
+                        referrer.remaining_invites -= 1
+                        db.commit()
+
+                # ارسال کیبورد مشتری
+                await update.message.reply_text(
+                    "✅ ثبت نام موفق! لطفاً از منوی زیر استفاده کنید:",
+                    reply_markup=customer_kb
+                )
+            else:
+                await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
 
     except Exception as e:
-        logger.error(f"خطا در ثبت نام: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی!")
+        logger.error(f"خطای سیستمی: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
 
     finally:
         context.user_data.clear()
@@ -292,76 +344,74 @@ async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def generate_user_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        logger.info(f"درخواست لینک دعوت از کاربر {user.id}")
+        with SessionLocal() as db:
+            # بررسی تعداد دعوت‌های باقی‌مانده
+            db_user = db.query(User).get(user.id)
+            if db_user.remaining_invites <= 0:
+                await update.message.reply_text("❌ تعداد دعوت‌های شما تکمیل شده!")
+                return
 
-        # بررسی وجود کاربر در دیتابیس
-        if not database.get_user(user.id):
-            await update.message.reply_text("❌ لطفاً ابتدا ثبت نام کنید!")
-            return
+            # تولید کد یکتا
+            code = f"USER_{secrets.token_urlsafe(8)}"
+            while db.query(Referral).filter_by(referral_code=code).first():
+                code = f"USER_{secrets.token_urlsafe(8)}"
 
-        # دریافت تعداد دعوت‌های باقی‌مانده
-        remaining = database.get_remaining_invites(user.id)
-        if remaining <= 0:
-            await update.message.reply_text("❌ ظرفیت دعوت شما تکمیل شده است!")
-            return
+            # ایجاد رفرال
+            new_ref = Referral(
+                referrer_id=user.id,
+                referral_code=code,
+                expires_at=datetime.now() + timedelta(days=30),
+                max_uses=1,  # تک بار مصرف
+                is_admin_code=False
+            )
 
-        # تولید کد رفرال جدید
-        code, error = database.create_referral(user.id, is_admin=False)
-        if error:
-            await update.message.reply_text(f"❌ {error}")
-            return
+            db.add(new_ref)
+            db_user.remaining_invites -= 1
+            db.commit()
 
-        # ساخت لینک دعوت با فرمت صحیح
-        bot = await context.bot.get_me()
-        referral_link = f"https://t.me/{bot.username}?start=ref_{code}"
+            # ساخت لینک
+            bot = await context.bot.get_me()
+            invite_link = f"https://t.me/{bot.username}?start=ref_{code}"
 
-        # ارسال پاسخ با فرمت HTML برای هایپرلینک
-        await update.message.reply_text(
-            f"🎉 <b>لینک دعوت شما:</b>\n"
-            f"<a href='{referral_link}'>کلیک کنید برای دعوت</a>\n\n"
-            f"🔢 تعداد دعوت باقی‌مانده: <b>{remaining}</b>\n"
-            "⚠️ توجه: کاربر باید مستقیم روی لینک بالا کلیک کند!",
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-        logger.info(f"لینک دعوت برای کاربر {user.id} تولید شد: {code}")
+            await update.message.reply_text(
+                f"🔗 لینک دعوت شما:\n{invite_link}\n"
+                f"📝 تعداد باقی‌مانده: {db_user.remaining_invites}\n"
+                "⚠️ این لینک فقط یک بار قابل استفاده است!"
+            )
 
     except Exception as e:
-        logger.error(f"خطا در تولید لینک دعوت: {str(e)}", exc_info=True)
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+        logger.error(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در تولید لینک!")
 
 
 async def handle_gift_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        logger.debug(f"شروع پردازش درخواست هدیه برای کاربر {user.id}")
+        with SessionLocal() as db:
+            # بررسی شرایط دریافت هدیه
+            user_data = db.query(User).get(user.id)
 
-        # لاگ اطلاعات کاربر
-        user_data = database.get_user(user.id)
-        logger.debug(f"اطلاعات کاربر: {user_data}")
+            # بررسی وجود کاربر در دیتابیس
+            if not user_data:
+                await update.message.reply_text("❌ کاربر یافت نشد!")
+                return
 
-        # بررسی شرایط
-        logger.debug("بررسی شرایط دریافت هدیه")
-        if database.meets_gift_conditions(user.id):
-            logger.debug("کاربر واجد شرایط است")
-
-            # افزودن اعتبار
-            logger.debug("در حال افزودن اعتبار...")
-            if database.add_discount(user.id, 100):
-                logger.debug("اعتبار با موفقیت افزوده شد")
-                await update.message.reply_text("🎉 100 دلار اعتبار هدیه دریافت کردید!")
+            # بررسی شرایط هدیه
+            if meets_gift_conditions(db, user.id):
+                # افزودن اعتبار به کیف پول
+                wallet = db.query(Wallet).get(user.id)
+                if wallet:
+                    wallet.discount += 100  # افزودن 100 واحد اعتبار
+                    db.commit()
+                    await update.message.reply_text("🎉 100 واحد اعتبار هدیه دریافت کردید!")
+                else:
+                    await update.message.reply_text("❌ کیف پول یافت نشد!")
             else:
-                logger.error("خطا در افزودن اعتبار")
-                await update.message.reply_text("❌ خطا در اعطای هدیه!")
-
-        else:
-            logger.debug("کاربر واجد شرایط نیست")
-            await update.message.reply_text("⚠️ شما شرایط دریافت هدیه را ندارید.")
+                await update.message.reply_text("⚠️ شرایط دریافت هدیه را ندارید!")
 
     except Exception as e:
-        logger.exception(f"خطای بحرانی: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً بعداً تلاش کنید.")
+        logger.error(f"خطا در پردازش درخواست هدیه: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
 
 
 # user_handlers.py
@@ -388,3 +438,4 @@ async def show_direct_invites(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logging.error(f"خطا در نمایش مدعوین: {str(e)}", exc_info=True)
         await update.message.reply_text("❌ خطای سیستمی!")
+
