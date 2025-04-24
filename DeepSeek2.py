@@ -1,41 +1,36 @@
 import os
 
 
-def find_python_files(search_folders=['database', 'handlers', 'xxx']):
-    """پیدا کردن تمام فایل‌های پایتون در پوشه‌های مشخص شده با آدرس کامل"""
-    python_files = []
+def find_selected_files(search_folders=['database', 'handlers', 'config', 'xxx']):
+    """پیدا کردن تمام فایل‌های پایتون، YAML و ENV در پوشه‌های مشخص شده با آدرس کامل"""
+    selected_files = []
 
-    # بررسی پوشه جاری2
-
+    # بررسی فایل‌های پوشه جاری
     for file in os.listdir('.'):
-        if file.endswith('.py'):
-            python_files.append(file)  # با پسوند .py
+        if file.endswith(('.py', '.yml', '.yaml', '.env')):
+            selected_files.append(file)  # با پسوندهای مورد نظر
 
     # بررسی پوشه‌های دیگر
     for folder in search_folders:
         if os.path.exists(folder):
             for root, dirs, files in os.walk(folder):
                 for file in files:
-                    if file.endswith('.py'):
-                        # ساخت مسیر کامل نسبت به پوشه جاری
+                    if file.endswith(('.py', '.yml', '.yaml', '.env')):
                         full_path = os.path.join(root, file)
-                        # تبدیل به فرمت استاندارد با بک‌اسلش
                         standardized_path = full_path.replace('/', '\\')
-                        python_files.append(standardized_path)
+                        selected_files.append(standardized_path)
 
-    return python_files
+    return selected_files
 
 
 def combine_files(file_paths, output_file='combined_modules.txt'):
-    """ترکیب محتوای فایل‌های پایتون در یک فایل متنی"""
-    # پاک کردن محتوای فایل خروجی اگر از قبل وجود دارد
+    """ترکیب محتوای فایل‌ها در یک فایل متنی"""
     if os.path.exists(output_file):
         with open(output_file, 'w') as f:
             f.write('')
 
     with open(output_file, 'a', encoding='utf-8') as out_file:
         for path in file_paths:
-            # اطمینان از وجود فایل
             if not os.path.exists(path):
                 print(f"خطا: فایل {path} یافت نشد!")
                 continue
@@ -44,12 +39,10 @@ def combine_files(file_paths, output_file='combined_modules.txt'):
                 with open(path, 'r', encoding='utf-8') as in_file:
                     content = in_file.read()
 
-                # نوشتن نام فایل به عنوان عنوان
                 out_file.write(f"\n\n{'=' * 50}\n")
                 out_file.write(f"# فایل: {path}\n")
                 out_file.write(f"{'=' * 50}\n\n")
                 out_file.write(content)
-
                 print(f"فایل {path} با موفقیت اضافه شد.")
 
             except Exception as e:
@@ -81,18 +74,18 @@ def get_user_selection(all_files):
         print("\nعملیات مورد نظر را انتخاب کنید (عدد/a/s/u/l): ")
         user_input = input().lower()
 
-        if user_input == 'a':  # انتخاب همه
+        if user_input == 'a':
             selected_files = all_files.copy()
             print("همه فایل‌ها انتخاب شدند.")
             continue
 
-        if user_input == 's':  # شروع ترکیب
+        if user_input == 's':
             if not selected_files:
                 print("هیچ فایلی انتخاب نشده است!")
                 continue
             return selected_files
 
-        if user_input == 'u':  # لغو انتخاب آخر
+        if user_input == 'u':
             if selected_files:
                 removed = selected_files.pop()
                 print(f"فایل {removed} از لیست انتخاب‌ها حذف شد.")
@@ -100,10 +93,9 @@ def get_user_selection(all_files):
                 print("لیست انتخاب‌ها خالی است!")
             continue
 
-        if user_input == 'l':  # نمایش مجدد لیست
+        if user_input == 'l':
             continue
 
-        # انتخاب فایل بر اساس عدد
         try:
             index = int(user_input) - 1
             if 0 <= index < len(all_files):
@@ -120,15 +112,15 @@ def get_user_selection(all_files):
 
 
 if __name__ == "__main__":
-    print("ترکیب‌کننده فایل‌های پایتون - نسخه پیشرفته")
-    all_python_files = find_python_files()
+    print("ترکیب‌کننده فایل‌های پایتون، YAML و ENV - نسخه پیشرفته")
+    all_files = find_selected_files()
 
-    print("\nفایل‌های پایتون موجود:")
-    for i, file_path in enumerate(all_python_files, 1):
+    print("\nفایل‌های موجود (پایتون، YAML و ENV):")
+    for i, file_path in enumerate(all_files, 1):
         print(f"{i}: {file_path}")
 
-    selected_files = get_user_selection(all_python_files)
+    selected_files = get_user_selection(all_files)
     combine_files(selected_files)
 
     print("\nعملیات با موفقیت به پایان رسید!")
-    print("می‌توانید نتایج را در فایل 'combined_modules.txt' مشاهده کنید.")
+    print("نتایج در فایل 'combined_modules.txt' ذخیره شد.")

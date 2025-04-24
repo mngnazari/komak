@@ -1,6 +1,9 @@
-import os
-from telegram.ext import CallbackQueryHandler
-import keyboards  # <--- این خط را اضافه کنید
+import logging
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from handlers.user_handlers import start
+from config import Config
+from models import Base, engine
+
 from telegram.ext import Application as TgApplication
 
 from telegram.ext import (
@@ -35,6 +38,10 @@ import logging
 from dotenv import load_dotenv
 import os
 from handlers.admin_handlers import admin_generate_referral
+from models import Base, engine
+Base.metadata.drop_all(bind=engine)  # حذف جداول قدیمی
+Base.metadata.create_all(bind=engine)  # ایجاد جدید
+
 load_dotenv()
 ADMINS = [2138687434]  # آیدی ادمین اصلی را اینجا وارد کنید
 DB_CONFIG = {
@@ -44,11 +51,13 @@ DB_CONFIG = {
     'database': os.getenv('DB_NAME'),
     'charset': 'utf8mb4'
 }
-
+# در ابتدای main.py
+import logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG  # تغییر به DEBUG برای نمایش تمام لاگ‌ها
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG
 )
+
 # غیرفعال کردن لاگ‌های کتابخانه‌های خارجی
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -66,7 +75,9 @@ TOKEN = "7943645778:AAEXYzDKUc2D7mWaTcLrSkH4AjlJvVq7PaU"
 
 
 def main():
-    database.create_tables()
+    # ایجاد جداول اگر وجود ندارند
+    Base.metadata.create_all(bind=engine)
+
 
     app = TgApplication.builder().token(TOKEN).build()
 

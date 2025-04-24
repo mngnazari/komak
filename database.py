@@ -1,9 +1,12 @@
-import mysql.connector
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+from models import User, File, Referral, InvitedUser, Wallet, get_db, SessionLocal
 from datetime import datetime, timedelta
 import secrets
 import string
 import logging
 from config import Config
+from models import SessionLocal, User, Wallet
 
 logger = logging.getLogger(__name__)
 
@@ -23,33 +26,18 @@ def get_db_connection():
         connect_timeout = 30
     )
 
-
-
-
-def is_admin(user_id: int) -> bool:
-    """بررسی دسترسی ادمین"""
-    conn = get_db_connection()
+def is_admin(db, user_id: int) -> bool:
     try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT is_admin FROM users
-            WHERE id = %s
-        """, (user_id,))
-        result = cursor.fetchone()
-        return result[0] if result else False
-    except Exception as e:
+        user = db.query(User).get(user_id)
+        return user.is_admin if user else False
+    except SQLAlchemyError as e:
         logger.error(f"خطای بررسی ادمین: {str(e)}")
         return False
-    finally:
-        conn.close()
 
 # ----------------------
 # توابع کمکی
 # ----------------------
 def generate_referral_code(is_admin: bool = False) -> str:
-    """
-    تولید کد رفرال با پیشوند ADMIN_ برای ادمین‌ها
-    """
     prefix = "ADMIN_" if is_admin else ""
     suffix = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
     return f"{prefix}{suffix}"
@@ -57,123 +45,33 @@ def generate_referral_code(is_admin: bool = False) -> str:
 # ----------------------
 # ایجاد جداول (بهینه‌سازی شده برای MySQL)
 # ----------------------
-def create_tables():
-    """ایجاد جداول با سینتکس صحیح MySQL"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    try:
-        # جدول کاربران
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY,
-                full_name VARCHAR(255) NOT NULL,
-                phone VARCHAR(20) UNIQUE NOT NULL,
-                inviter_id BIGINT,
-                remaining_invites INT DEFAULT 1,
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
-                is_admin BOOLEAN DEFAULT FALSE  # <-- اضافه کردن این خط
-            )
-        ''')
-
-        # جدول فایل‌ها
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS files (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                file_name VARCHAR(255) NOT NULL,
-                mime_type VARCHAR(100),
-                file_id VARCHAR(255) UNIQUE NOT NULL,
-                file_unique_id VARCHAR(255),
-                created_at DATETIME NOT NULL,
-                quantity INT DEFAULT 1,
-                description TEXT,
-                status VARCHAR(50) DEFAULT 'در حال انجام',
-                notes TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول رفرال‌ها
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referral_code VARCHAR(50) UNIQUE NOT NULL,
-                used_by BIGINT DEFAULT NULL,
-                created_at DATETIME NOT NULL,
-                expires_at DATETIME NOT NULL,
-                is_admin BOOLEAN DEFAULT FALSE,
-                FOREIGN KEY (referrer_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول مدعوین
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS invited_users (
-                referrer_id BIGINT NOT NULL,
-                invited_user_id BIGINT PRIMARY KEY,
-                invited_full_name VARCHAR(255) NOT NULL,
-                invited_phone VARCHAR(20) NOT NULL,
-                invited_at DATETIME NOT NULL,
-                FOREIGN KEY (referrer_id) REFERENCES users(id),
-                FOREIGN KEY (invited_user_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول کیف پول
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                user_id BIGINT PRIMARY KEY,
-                balance DECIMAL(10,2) DEFAULT 0.00,
-                discount DECIMAL(10,2) DEFAULT 0.00,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-
-        logger.info("جداول با موفقیت ایجاد شدند")
-    except mysql.connector.Error as err:
-        logger.error(f"خطا در ایجاد جداول: {err}")
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
-        conn.close()
 
 
 # ----------------------
 # توابع کاربران
 # ----------------------
-def add_user(user_data: dict):
-    conn = None
-    cursor = None
+def add_user(user_data: dict) -> bool:
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        with SessionLocal() as db:
+            new_user = User(
+                id=user_data['id'],
+                full_name=user_data['full_name'],
+                phone=user_data.get('phone', 'بدون شماره'),
+                inviter_id=user_data.get('inviter_id'),
+                is_admin=user_data.get('is_admin', False)
+            )
 
-        cursor.execute('''
-            INSERT INTO users 
-            (id, full_name, phone, inviter_id, created_at, updated_at, is_admin)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ''', (
-            user_data['id'],
-            user_data['full_name'],
-            user_data.get('phone', 'بدون شماره'),
-            user_data.get('inviter_id'),
-            user_data.get('created_at', datetime.now()),
-            datetime.now(),
-            user_data.get('is_admin', False)
-        ))
+            if new_user.is_admin:
+                wallet = Wallet(user_id=new_user.id)
+                db.add(wallet)
 
-        conn.commit()
-        return True
-    except mysql.connector.Error as e:
-        logger.error(f"خطا در افزودن کاربر: {str(e)}")
+            db.add(new_user)
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"خطا در ثبت کاربر: {str(e)}")
         return False
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
 
 
 # ----------------------
@@ -184,64 +82,38 @@ def add_user(user_data: dict):
 # ==============================
 from mysql.connector import IntegrityError
 
-def create_referral(user_id: int, is_admin: bool = False) -> str:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        while True:
-            code = generate_referral_code(is_admin)
-            try:
-                cursor.execute('''
-                    INSERT INTO referrals 
-                    (referrer_id, referral_code, is_admin, expires_at)
-                    VALUES (%s, %s, %s, DATE_ADD(NOW(), INTERVAL 1 YEAR))
-                ''', (user_id, code, is_admin))
-                conn.commit()
-                return code
-            except IntegrityError:
-                conn.rollback()
-                continue
-    finally:
-        cursor.close()
-        conn.close()
+def create_referral(db: Session, user_id: int, is_admin: bool = False) -> str:
+    while True:
+        code = generate_referral_code(is_admin)
+        existing = db.query(Referral).filter(Referral.referral_code == code).first()
+        if not existing:
+            referral = Referral(
+                referrer_id=user_id,
+                referral_code=code,
+                is_admin=is_admin,
+                expires_at=datetime.now() + timedelta(days=365)
+            )
+            db.add(referral)
+            db.commit()
+            return code
 
 # ----------------------
 # توابع اعتبارسنجی رفرال
 # ----------------------
-def validate_referral(code):
-    """اعتبارسنجی کد دعوت و بازگرداندن referrer_id"""
-    conn = None
-    cursor = None
+def validate_referral(db, code: str):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        referral = db.query(Referral).filter(
+            Referral.referral_code == code,
+            Referral.used_by == None,
+            Referral.expires_at > datetime.now()
+        ).first()
 
-        cursor.execute('''
-            SELECT referrer_id, expires_at 
-            FROM referrals 
-            WHERE referral_code = %s 
-                AND used_by IS NULL
-                AND expires_at > NOW()
-        ''', (code,))
-
-        result = cursor.fetchone()
-        if not result:
-            logger.warning(f"کد دعوت نامعتبر یا منقضی شده: {code}")
-            return False, "کد نامعتبر یا منقضی شده است"
-
-        return True, result['referrer_id']
-
-    except mysql.connector.Error as e:
-        logger.error(f"خطای دیتابیس در اعتبارسنجی رفرال: {e}")
+        if not referral:
+            return False, "کد دعوت نامعتبر یا منقضی شده است"
+        return True, referral.referrer_id
+    except SQLAlchemyError as e:
+        logger.error(f"خطای اعتبارسنجی رفرال: {str(e)}")
         return False, "خطای سیستمی"
-    except Exception as e:
-        logger.error(f"خطای ناشناخته در اعتبارسنجی: {e}", exc_info=True)
-        return False, "خطای سیستمی"
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
 # ----------------------

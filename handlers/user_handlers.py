@@ -1,13 +1,19 @@
-from telegram import Update, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
-from datetime import datetime
-import database
-import keyboards
-from keyboards import customer_kb, admin_kb, wallet_kb, archive_reply_kb
-from jdatetime import datetime as jdatetime
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 
+import database
+from keyboards import admin_kb, customer_kb
+from models import SessionLocal, User, Referral
+from sqlalchemy.exc import SQLAlchemyError
+from database import add_user, validate_referral, is_admin
+from config import Config
 import logging
-import sqlite3
 logger = logging.getLogger(__name__)
 
 # تنظیم سطح لاگ
@@ -21,59 +27,78 @@ FULL_NAME, PHONE = range(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    args = context.args
-    # ثبت خودکار ادمین اگر وجود ندارد
-    if user.id == ADMIN_ID:
-        admin_data = {
-            'id': user.id,
-            'full_name': "ادمین سیستم",
-            'phone': "بدون شماره",
-            'is_admin': True
-        }
-        if not database.get_user(user.id):
-            database.add_user(admin_data)
-        await update.message.reply_text("👑 پنل مدیریتی فعال شد!", reply_markup=keyboards.admin_kb)
+    try:
+        with SessionLocal() as db:
+            # بررسی اول: آیا کاربر در لیست ادمین‌های config است؟
+            if user.id in Config.ADMINS:
+                db_admin = db.query(User).get(user.id)
+
+                if not db_admin:
+                    # ایجاد رکورد ادمین اگر وجود ندارد
+                    admin_data = {
+                        'id': user.id,
+                        'full_name': user.full_name or "ادمین سیستم",
+                        'phone': "بدون شماره",
+                        'is_admin': True
+                    }
+
+                    if add_user(admin_data):
+                        await update.message.reply_text(
+                            "👑 پنل مدیریتی فعال شد!",
+                            reply_markup=admin_kb
+                        )
+                    else:
+                        await update.message.reply_text("❌ خطا در ایجاد حساب ادمین")
+                    return ConversationHandler.END
+                else:
+                    # به روزرسانی اطلاعات ادمین اگر تغییر کرده
+                    if db_admin.full_name != user.full_name:
+                        db_admin.full_name = user.full_name
+                        db.commit()
+
+                    await update.message.reply_text(
+                        "👑 پنل مدیریتی فعال شد!",
+                        reply_markup=admin_kb
+                    )
+                    return ConversationHandler.END
+
+            # منطق برای کاربران عادی
+            db_user = db.query(User).get(user.id)
+
+            if db_user:
+                await update.message.reply_text(
+                    "✅ قبلاً ثبت نام کرده‌اید!",
+                    reply_markup=customer_kb
+                )
+                return ConversationHandler.END
+
+            # استخراج کد دعوت از آرگومان‌ها
+            referral_code = None
+            if context.args:
+                first_arg = context.args[0]
+                if first_arg.startswith("ref_"):
+                    referral_code = first_arg[4:]
+
+            if not referral_code:
+                await update.message.reply_text("🔒 دسترسی فقط از طریق لینک دعوت ممکن است!")
+                return ConversationHandler.END
+
+            # اعتبارسنجی کد دعوت
+            valid, referrer_id = validate_referral(db, referral_code)
+            if not valid:
+                await update.message.reply_text(f"❌ {referrer_id}")
+                return ConversationHandler.END
+
+            context.user_data["referral_code"] = referral_code
+            context.user_data["referrer_id"] = referrer_id
+
+            await update.message.reply_text("👤 لطفاً نام کامل خود را وارد کنید:")
+            return FULL_NAME
+
+    except Exception as e:
+        logger.error(f"خطای سیستمی: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
         return ConversationHandler.END
-
-
-    # اگر کاربر ادمین است و در جدول وجود ندارد، ثبت شود
-    if user.id == database.ADMIN_ID and not database.get_user(user.id):
-        user_data = (
-            user.id,
-            "ادمین",  # نام کامل ادمین
-            "بدون شماره",  # شماره تماس (اختیاری)
-            None,  # inviter_id برای ادمین None است
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-        database.add_user(user_data)
-
-    # اگر ادمین باشد
-    if user.id == ADMIN_ID:
-        await update.message.reply_text("👑 پنل مدیریتی فعال شد!", reply_markup=admin_kb)
-        return ConversationHandler.END
-
-    # بررسی ثبت‌نام قبلی
-    if database.get_user(user.id):
-        await update.message.reply_text("✅ قبلاً ثبت نام کرده‌اید!")
-        return ConversationHandler.END
-
-    # استخراج کد رفرال
-    referral_code = None
-    if args:
-        for arg in args:
-            if arg.startswith("ref_"):
-                referral_code = arg[4:]
-                break
-
-    if not referral_code:
-        await update.message.reply_text("🔒 دسترسی فقط از طریق لینک دعوت ممکن است!")
-        return ConversationHandler.END
-
-    context.user_data["referral_code"] = referral_code
-    await update.message.reply_text("👤 لطفاً نام کامل خود را وارد کنید:")
-    return FULL_NAME
-
 
 
 async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,77 +114,107 @@ async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     try:
-        # دریافت شماره تماس
-        if update.message.contact:
-            phone = update.message.contact.phone_number
-        else:
-            phone = update.message.text.strip()
-            if not phone.startswith('+'):
-                phone = f"+98{phone[-10:]}"  # فرمت ایران
+        with SessionLocal() as db:
+            # استخراج اطلاعات از context
+            phone = (
+                update.message.contact.phone_number
+                if update.message.contact
+                else update.message.text.strip()
+            )
 
-        # اعتبارسنجی نهایی کد رفرال
-        referral_code = context.user_data.get("referral_code")
-        is_valid, referrer_id = database.validate_referral(referral_code)
+            user_data = {
+                'id': update.effective_user.id,
+                'full_name': context.user_data["full_name"],
+                'phone': phone,
+                'inviter_id': context.user_data["referrer_id"],
+                'is_admin': False
+            }
 
-        if not is_valid:
-            await update.message.reply_text(f"❌ {referrer_id}")
-            context.user_data.clear()
-            return ConversationHandler.END
+            if add_user(user_data):
+                # علامت‌گذاری کد دعوت به عنوان استفاده شده
+                referral = db.query(Referral).filter(
+                    Referral.referral_code == context.user_data["referral_code"]
+                ).first()
 
-        # آماده‌سازی داده‌های کاربر
-        user_data = (
-            user.id,
-            context.user_data["full_name"],
-            phone,
-            referrer_id,  # inviter_id از کد رفرال
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if referral:
+                    referral.used_by = user_data['id']
+                    db.commit()
+
+                await update.message.reply_text(
+                    "✅ ثبت نام موفق!",
+                    reply_markup=customer_kb
+                )
+            else:
+                await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
+
+    except Exception as e:
+        logger.error(f"خطا در ثبت نام: {str(e)}", exc_info=True)
+        await update.message.reply
+
+
+async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["full_name"] = update.message.text
+    await update.message.reply_text(
+        "📱 لطفاً شماره تماس خود را ارسال کنید:",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("ارسال شماره 📲", request_contact=True)]],
+            resize_keyboard=True
+        )
+    )
+    return PHONE
+
+
+async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        phone = (
+            update.message.contact.phone_number
+            if update.message.contact
+            else update.message.text.strip()
         )
 
-        # ذخیره کاربر جدید
-        if database.add_user(user_data):
-            # ثبت مدعو در لیست دعوت‌کننده
-            invited_user_data = (
-                user.id,
-                context.user_data["full_name"],
-                phone,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            )
+        user_data = {
+            'id': update.effective_user.id,
+            'full_name': context.user_data["full_name"],
+            'phone': phone,
+            'is_admin': False
+        }
 
-            # افزودن به جدول مدعوین
-            success = database.add_invited_user(
-                referrer_id=referrer_id,
-                user_data=invited_user_data
-            )
-
-            if not success:
-                logging.error(f"خطا در ثبت مدعو برای کاربر {user.id}")
-
-            # کاهش تعداد دعوت‌های باقی‌مانده (اگر کاربر عادی باشد)
-            if referrer_id != database.ADMIN_ID:
-                database.decrement_invites(referrer_id)
-                database.add_discount(referrer_id, 50)
-
-            # علامت‌گذاری کد رفرال به عنوان استفاده شده
-            database.mark_referral_used(referral_code, user.id)
-
+        if add_user(user_data):
             await update.message.reply_text(
-                "✅ ثبت نام موفق! لطفا از منوی زیر استفاده کنید:",
-                reply_markup=keyboards.customer_kb
+                "✅ ثبت نام موفق!",
+                reply_markup=ReplyKeyboardMarkup([["منوی کاربری"]], resize_keyboard=True)
             )
         else:
-            await update.message.reply_text("❌ خطا در ثبت اطلاعات کاربر!")
+            await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
 
-    except sqlite3.IntegrityError:
-        await update.message.reply_text("❌ این شماره قبلاً ثبت شده است!")
     except Exception as e:
-        logging.exception(f"🔥 خطای بحرانی: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدد تلاش کنید.")
+        logger.error(f"خطا در ثبت نام: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی!")
+
     finally:
         context.user_data.clear()
         return ConversationHandler.END
+
+
+# فایل: handlers/user_handlers.py
+async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ ثبت نام لغو شد.")
+    return ConversationHandler.END
+
+
+# اصلاح بخش پایانی فایل
+start_conversation = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    states={
+        FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_full_name)],
+        PHONE: [MessageHandler(filters.CONTACT | filters.TEXT & ~filters.COMMAND, get_phone)]
+    },
+    fallbacks=[CommandHandler("cancel", cancel_registration)]
+)
+
+
 
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,14 +242,7 @@ async def handle_active_orders(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(response)
 
-async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """لغو فرایند ثبت نام"""
-    await update.message.reply_text(
-        "❌ ثبت نام لغو شد.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
+
 
 
 async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
