@@ -18,11 +18,11 @@ import os
 
 class Config:
     # تنظیمات دیتابیس
-    DB_HOST = os.getenv("DB_HOST", "localhost")
-    DB_PORT = os.getenv("DB_PORT", 3308)
-    DB_USER = os.getenv("DB_USER", "testuser")
-    DB_PASS = os.getenv("DB_PASS", "testpass")
-    DB_NAME = os.getenv("DB_NAME", "print3d")
+    DB_HOST = '127.0.0.1'
+    DB_PORT =3308  # تبدیل به عدد
+    DB_USER ='testuser'
+    DB_PASS = 'testpass'
+    DB_NAME ='print3d'
 
     # تنظیمات تلگرام
     TG_TOKEN = os.getenv("TG_TOKEN", "YOUR_BOT_TOKEN")
@@ -38,13 +38,15 @@ class Config:
 # فایل: database.py
 ==================================================
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from models import User, File, Referral, InvitedUser, Wallet, get_db
+from models import User, File, Referral, InvitedUser, Wallet, get_db, SessionLocal
 from datetime import datetime, timedelta
 import secrets
 import string
 import logging
 from config import Config
+from models import SessionLocal, User, Wallet
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ def is_admin(user_id: int) -> bool:
         with SessionLocal() as db:
             user = db.query(User).get(user_id)
             return user.is_admin if user else False
-    except SQLAlchemyError as e:
+    except Exception as e:
         logger.error(f"خطا در بررسی ادمین: {str(e)}")
         return False
 
@@ -81,92 +83,12 @@ def generate_referral_code(is_admin: bool = False) -> str:
     suffix = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
     return f"{prefix}{suffix}"
 
+
+
 # ----------------------
 # ایجاد جداول (بهینه‌سازی شده برای MySQL)
 # ----------------------
-def create_tables():
-    """ایجاد جداول با سینتکس صحیح MySQL"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    try:
-        # جدول کاربران
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY,
-                full_name VARCHAR(255) NOT NULL,
-                phone VARCHAR(20) UNIQUE NOT NULL,
-                inviter_id BIGINT,
-                remaining_invites INT DEFAULT 1,
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
-                is_admin BOOLEAN DEFAULT FALSE  # <-- اضافه کردن این خط
-            )
-        ''')
-
-        # جدول فایل‌ها
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS files (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                file_name VARCHAR(255) NOT NULL,
-                mime_type VARCHAR(100),
-                file_id VARCHAR(255) UNIQUE NOT NULL,
-                file_unique_id VARCHAR(255),
-                created_at DATETIME NOT NULL,
-                quantity INT DEFAULT 1,
-                description TEXT,
-                status VARCHAR(50) DEFAULT 'در حال انجام',
-                notes TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول رفرال‌ها
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                referrer_id BIGINT NOT NULL,
-                referral_code VARCHAR(50) UNIQUE NOT NULL,
-                used_by BIGINT DEFAULT NULL,
-                created_at DATETIME NOT NULL,
-                expires_at DATETIME NOT NULL,
-                is_admin BOOLEAN DEFAULT FALSE,
-                FOREIGN KEY (referrer_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول مدعوین
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS invited_users (
-                referrer_id BIGINT NOT NULL,
-                invited_user_id BIGINT PRIMARY KEY,
-                invited_full_name VARCHAR(255) NOT NULL,
-                invited_phone VARCHAR(20) NOT NULL,
-                invited_at DATETIME NOT NULL,
-                FOREIGN KEY (referrer_id) REFERENCES users(id),
-                FOREIGN KEY (invited_user_id) REFERENCES users(id)
-            )
-        ''')
-
-        # جدول کیف پول
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                user_id BIGINT PRIMARY KEY,
-                balance DECIMAL(10,2) DEFAULT 0.00,
-                discount DECIMAL(10,2) DEFAULT 0.00,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-
-        logger.info("جداول با موفقیت ایجاد شدند")
-    except mysql.connector.Error as err:
-        logger.error(f"خطا در ایجاد جداول: {err}")
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
-        conn.close()
 
 
 # ----------------------
@@ -183,19 +105,15 @@ def add_user(user_data: dict) -> bool:
                 is_admin=user_data.get('is_admin', False)
             )
 
-            # ایجاد کیف پول برای کاربر جدید
-            new_wallet = Wallet(user_id=user_data['id'])
+            if new_user.is_admin:
+                wallet = Wallet(user_id=new_user.id)
+                db.add(wallet)
 
             db.add(new_user)
-            db.add(new_wallet)
             db.commit()
             return True
-    except SQLAlchemyError as e:
-        logger.error(f"خطا در افزودن کاربر: {str(e)}")
-        db.rollback()
-        return False
     except Exception as e:
-        logger.error(f"خطای ناشناخته: {str(e)}")
+        logger.error(f"خطا در ثبت کاربر: {str(e)}")
         return False
 
 
@@ -226,15 +144,32 @@ def create_referral(db: Session, user_id: int, is_admin: bool = False) -> str:
 # توابع اعتبارسنجی رفرال
 # ----------------------
 def validate_referral(db: Session, code: str):
-    referral = db.query(Referral).filter(
-        Referral.referral_code == code,
-        Referral.used_by == None,
-        Referral.expires_at > datetime.now()
-    ).first()
+    try:
+        referral = db.query(Referral).filter(
+            Referral.referral_code == code,
+            Referral.is_active == True,
+            Referral.used_count < Referral.max_uses,
+            Referral.expires_at > datetime.now()
+        ).first()
 
-    if not referral:
-        return False, "کد نامعتبر یا منقضی شده است"
-    return True, referral.referrer_id
+        if not referral:
+            return False, "کد نامعتبر یا منقضی شده"
+
+        # افزایش شمارنده استفاده
+        referral.used_count += 1
+        if referral.used_count >= referral.max_uses:
+            referral.is_active = False
+
+        # افزودن اعتبار
+        referrer = db.query(User).get(referral.referrer_id)
+        referrer.total_earned += 50  # 50 دلار جایزه
+        db.commit()
+
+        return True, referral.referrer_id
+
+    except Exception as e:
+        logger.error(f"خطای اعتبارسنجی: {str(e)}")
+        return False, "خطای سیستمی"
 
 
 # ----------------------
@@ -372,41 +307,22 @@ def decrement_invites(user_id):
 # ----------------------
 # توابع کاربران (تکمیلی)
 # ----------------------
-def get_user(user_id):
-    """دریافت اطلاعات کاربر با فرمت دیکشنری"""
-    conn = None
-    cursor = None
+def add_user(user_data: dict) -> bool:
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        with SessionLocal() as db:
+            new_user = User(**user_data)
+            db.add(new_user)
 
-        cursor.execute('''
-            SELECT 
-                u.*,
-                w.balance,
-                w.discount
-            FROM users u
-            LEFT JOIN wallets w ON u.id = w.user_id
-            WHERE u.id = %s
-        ''', (user_id,))
+            # ایجاد کیف پول برای کاربر جدید
+            wallet = Wallet(user_id=user_data['id'])
+            db.add(wallet)
 
-        result = cursor.fetchone()
-        if result:
-            # تبدیل مقادیر عددی به نوع صحیح
-            result['remaining_invites'] = int(result['remaining_invites'])
-            result['balance'] = float(result['balance'])
-            result['discount'] = float(result['discount'])
-
-        return result
-
-    except mysql.connector.Error as e:
-        logger.error(f"خطای دیتابیس در دریافت کاربر: {e}")
-        return None
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"خطا در افزودن کاربر: {str(e)}")
+        db.rollback()
+        return False
 
 
 # ----------------------
@@ -763,36 +679,27 @@ def add_discount(user_id, amount):
             conn.close()
 
 
-def meets_gift_conditions(user_id):
-    """بررسی شرایط دریافت هدیه"""
-    conn = None
-    cursor = None
+def meets_gift_conditions(db: Session, user_id: int) -> bool:
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        # شرایط دریافت هدیه:
+        # 1. حداقل 3 سفارش تکمیل شده در 3 ماه گذشته
+        # 2. مجموع تعداد محصولات حداقل 10 عدد
+        three_months_ago = datetime.now() - timedelta(days=90)
 
-        cursor.execute("""
-            SELECT 
-                COUNT(*) AS total_completed,
-                SUM(quantity) AS total_quantity
-            FROM files 
-            WHERE 
-                user_id = %s 
-                AND status = 'تکمیل شده'
-                AND created_at >= DATE_SUB(NOW(), INTERVAL 3 MONTH)
-        """, (user_id,))
+        orders = db.query(File).filter(
+            File.user_id == user_id,
+            File.status == 'تکمیل شده',
+            File.created_at >= three_months_ago
+        ).all()
 
-        result = cursor.fetchone()
-        return result['total_completed'] >= 3 and result['total_quantity'] >= 10
+        total_completed = len(orders)
+        total_quantity = sum(order.quantity for order in orders)
 
-    except mysql.connector.Error as e:
-        logger.error(f"خطای دیتابیس: {e}")
+        return total_completed >= 3 and total_quantity >= 10
+
+    except Exception as e:
+        logger.error(f"خطا در بررسی شرایط هدیه: {str(e)}")
         return False
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
 def get_completed_orders(user_id):
@@ -899,6 +806,17 @@ def format_referral_tree(tree_data):
         logger.error(f"خطا در فرمت‌بندی: {e}")
         return "خطا در نمایش ساختار"
 
+def add_purchase_commission(db: Session, user_id: int, amount: float):
+    try:
+        user = db.query(User).get(user_id)
+        if user.inviter_id:
+            referrer = db.query(User).get(user.inviter_id)
+            commission = amount * 0.05  # 5% کمیسیون
+            referrer.total_earned += commission
+            db.commit()
+    except Exception as e:
+        logger.error(f"خطای کمیسیون: {str(e)}")
+
 
 # ----------------------
 # توابع مدیریت مدعوین
@@ -935,154 +853,17 @@ if __name__ == "__main__":
     create_tables()  # این خط باید وجود داشته باشد
 
 ==================================================
-# فایل: DeepSeekCopy.py
-==================================================
-
-import os
-
-
-def find_python_files(search_folders=['database', 'handlers', 'xxx']):
-    """پیدا کردن تمام فایل‌های پایتون در پوشه‌های مشخص شده با آدرس کامل"""
-    python_files = []
-
-    # بررسی پوشه جاری2
-
-    for file in os.listdir('.'):
-        if file.endswith('.py'):
-            python_files.append(file)  # با پسوند .py
-
-    # بررسی پوشه‌های دیگر
-    for folder in search_folders:
-        if os.path.exists(folder):
-            for root, dirs, files in os.walk(folder):
-                for file in files:
-                    if file.endswith('.py'):
-                        # ساخت مسیر کامل نسبت به پوشه جاری
-                        full_path = os.path.join(root, file)
-                        # تبدیل به فرمت استاندارد با بک‌اسلش
-                        standardized_path = full_path.replace('/', '\\')
-                        python_files.append(standardized_path)
-
-    return python_files
-
-
-def combine_files(file_paths, output_file='combined_modules.txt'):
-    """ترکیب محتوای فایل‌های پایتون در یک فایل متنی"""
-    # پاک کردن محتوای فایل خروجی اگر از قبل وجود دارد
-    if os.path.exists(output_file):
-        with open(output_file, 'w') as f:
-            f.write('')
-
-    with open(output_file, 'a', encoding='utf-8') as out_file:
-        for path in file_paths:
-            # اطمینان از وجود فایل
-            if not os.path.exists(path):
-                print(f"خطا: فایل {path} یافت نشد!")
-                continue
-
-            try:
-                with open(path, 'r', encoding='utf-8') as in_file:
-                    content = in_file.read()
-
-                # نوشتن نام فایل به عنوان عنوان
-                out_file.write(f"\n\n{'=' * 50}\n")
-                out_file.write(f"# فایل: {path}\n")
-                out_file.write(f"{'=' * 50}\n\n")
-                out_file.write(content)
-
-                print(f"فایل {path} با موفقیت اضافه شد.")
-
-            except Exception as e:
-                print(f"خطا در پردازش فایل {path}: {str(e)}")
-
-    print(f"\nترکیب فایل‌ها با موفقیت در فایل {output_file} ذخیره شد.")
-
-
-def get_user_selection(all_files):
-    """دریافت انتخاب‌های کاربر به صورت یک‌به‌یک"""
-    selected_files = []
-
-    print("\nدستورالعمل:")
-    print("- برای انتخاب فایل، عدد مربوط به آن را وارد کنید")
-    print("- برای ترکیب همه فایل‌ها، کلید 'a' را بزنید")
-    print("- برای پایان انتخاب‌ها و شروع ترکیب، کلید 's' را بزنید")
-    print("- برای لغو انتخاب آخر، کلید 'u' را بزنید")
-    print("- برای مشاهده مجدد لیست فایل‌ها، کلید 'l' را بزنید")
-
-    while True:
-        print("\nلیست فایل‌های موجود:")
-        for i, file_path in enumerate(all_files, 1):
-            print(f"{i}: {file_path}")
-
-        print("\nفایل‌های انتخاب شده فعلی:")
-        for f in selected_files:
-            print(f"- {f}")
-
-        print("\nعملیات مورد نظر را انتخاب کنید (عدد/a/s/u/l): ")
-        user_input = input().lower()
-
-        if user_input == 'a':  # انتخاب همه
-            selected_files = all_files.copy()
-            print("همه فایل‌ها انتخاب شدند.")
-            continue
-
-        if user_input == 's':  # شروع ترکیب
-            if not selected_files:
-                print("هیچ فایلی انتخاب نشده است!")
-                continue
-            return selected_files
-
-        if user_input == 'u':  # لغو انتخاب آخر
-            if selected_files:
-                removed = selected_files.pop()
-                print(f"فایل {removed} از لیست انتخاب‌ها حذف شد.")
-            else:
-                print("لیست انتخاب‌ها خالی است!")
-            continue
-
-        if user_input == 'l':  # نمایش مجدد لیست
-            continue
-
-        # انتخاب فایل بر اساس عدد
-        try:
-            index = int(user_input) - 1
-            if 0 <= index < len(all_files):
-                selected_file = all_files[index]
-                if selected_file in selected_files:
-                    print("این فایل قبلاً انتخاب شده است!")
-                else:
-                    selected_files.append(selected_file)
-                    print(f"فایل {selected_file} به لیست انتخاب‌ها اضافه شد.")
-            else:
-                print("عدد وارد شده خارج از محدوده است!")
-        except ValueError:
-            print("ورودی نامعتبر! لطفاً عدد یا کلید عملیات را وارد کنید.")
-
-
-if __name__ == "__main__":
-    print("ترکیب‌کننده فایل‌های پایتون - نسخه پیشرفته")
-    all_python_files = find_python_files()
-
-    print("\nفایل‌های پایتون موجود:")
-    for i, file_path in enumerate(all_python_files, 1):
-        print(f"{i}: {file_path}")
-
-    selected_files = get_user_selection(all_python_files)
-    combine_files(selected_files)
-
-    print("\nعملیات با موفقیت به پایان رسید!")
-    print("می‌توانید نتایج را در فایل 'combined_modules.txt' مشاهده کنید.")
-
-==================================================
 # فایل: docker-compose.yml
 ==================================================
-
-version: '3.8'
 
 services:
   mysql:
     image: mysql:8.0
-    container_name: mysql_container
+    container_name: komak-mysql
+    command:
+      - --max_allowed_packet=256M
+      - --wait_timeout=28800
+      - --interactive_timeout=28800
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: print3d
@@ -1090,12 +871,30 @@ services:
       MYSQL_PASSWORD: testpass
     ports:
       - "3308:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-volumes:
-  mysql_data:
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: komak-phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: testuser
+      PMA_PASSWORD: testpass
+      UPLOAD_LIMIT: 256M
+    depends_on:
+      - mysql
+
+networks:
+  default:
+    name: komak_default
+
 
 ==================================================
 # فایل: keyboards.py
@@ -1107,6 +906,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
+from telegram import ReplyKeyboardMarkup, KeyboardButton
 
 import database
 
@@ -1114,12 +914,23 @@ import database
 # کیبورد پایه بدون نمایش تعداد
 # کیبورد کاربران
 # فایل keyboards.py
+# کیبورد ادمین
+admin_kb = ReplyKeyboardMarkup(
+    [
+        ["🔗 تولید لینک دعوت نامحدود"],
+        ["👥 لیست مشتریان", "📊 آمار سیستم"],
+        ["🌳 نمایش درخت دعوت", "⚙️ تنظیمات سیستم"]
+    ],
+    resize_keyboard=True,
+    is_persistent=True
+)
+
 customer_kb = ReplyKeyboardMarkup(
     [
         ["📂 آرشیو", "🔄 درحال انجام"],
         ["💳 کیف پول", "📞 پشتیبانی"],
         ["📜 قوانین", "🧾 فاکتور"],
-        ["🎁 دریافت هدیه", "👥 مدعوین من"] # اضافه شدن دکمه جدید
+        ["🎁 دریافت هدیه", "👥 مدعوین من"]
     ],
     resize_keyboard=True,
     is_persistent=True
@@ -1227,6 +1038,11 @@ import logging
 from dotenv import load_dotenv
 import os
 from handlers.admin_handlers import admin_generate_referral
+from models import Base, engine
+
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
+
 load_dotenv()
 ADMINS = [2138687434]  # آیدی ادمین اصلی را اینجا وارد کنید
 DB_CONFIG = {
@@ -1236,11 +1052,13 @@ DB_CONFIG = {
     'database': os.getenv('DB_NAME'),
     'charset': 'utf8mb4'
 }
-
+# در ابتدای main.py
+import logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG  # تغییر به DEBUG برای نمایش تمام لاگ‌ها
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG
 )
+
 # غیرفعال کردن لاگ‌های کتابخانه‌های خارجی
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -1260,7 +1078,7 @@ TOKEN = "7943645778:AAEXYzDKUc2D7mWaTcLrSkH4AjlJvVq7PaU"
 def main():
     # ایجاد جداول اگر وجود ندارند
     Base.metadata.create_all(bind=engine)
-    database.create_tables()
+
 
     app = TgApplication.builder().token(TOKEN).build()
 
@@ -1317,18 +1135,26 @@ if __name__ == "__main__":
 # فایل: models.py
 ==================================================
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, DECIMAL, Text
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
+from sqlalchemy import ForeignKey, Column, Integer, String, DateTime, Boolean
+from sqlalchemy.orm import relationship
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    DECIMAL,
+    Text,
+    Index
+)
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.sql import func
 from config import Config
 
 Base = declarative_base()
-# ایجاد session factory
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
 
 
 class User(Base):
@@ -1339,45 +1165,20 @@ class User(Base):
     phone = Column(String(20), unique=True, nullable=False)
     inviter_id = Column(Integer, ForeignKey('users.id'))
     remaining_invites = Column(Integer, default=1)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     is_admin = Column(Boolean, default=False)
+    remaining_invites = Column(Integer, default=5)  # دعوت‌های باقی‌مانده
+    total_earned = Column(DECIMAL(10,2), default=0.00)  # مجموع درآمد از رفرال
 
-    inviter = relationship("User", remote_side=[id])
+    # Relationships
+    inviter = relationship("User", remote_side=[id], back_populates="invitees")
+    invitees = relationship("User", back_populates="inviter")
+    files = relationship("File", back_populates="user")
+    referrals = relationship("Referral", back_populates="referrer")
+    invited_users = relationship("InvitedUser", foreign_keys="[InvitedUser.referrer_id]", back_populates="referrer")
     wallet = relationship("Wallet", uselist=False, back_populates="user")
-
-
-class Wallet(Base):
-    __tablename__ = 'wallets'
-
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
-    balance = Column(DECIMAL(10, 2), default=0.00)
-    discount = Column(DECIMAL(10, 2), default=0.00)
-
-    user = relationship("User", back_populates="wallet")
-
-
-engine = create_engine(
-    f"mysql+pymysql://{Config.DB_USER}:{Config.DB_PASS}@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_NAME}",
-    pool_pre_ping=True
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-Base.metadata.create_all(bind=engine)
-
-
-
-
-
+    referrals = relationship("Referral", back_populates="referrer")
 
 
 class File(Base):
@@ -1389,7 +1190,7 @@ class File(Base):
     mime_type = Column(String(100))
     file_id = Column(String(255), unique=True, nullable=False)
     file_unique_id = Column(String(255))
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, server_default=func.now())
     quantity = Column(Integer, default=1)
     description = Column(Text)
     status = Column(String(50), default='در حال انجام')
@@ -1402,14 +1203,16 @@ class Referral(Base):
     __tablename__ = 'referrals'
 
     id = Column(Integer, primary_key=True)
-    referrer_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    referral_code = Column(String(50), unique=True, nullable=False)
-    used_by = Column(Integer)
+    referrer_id = Column(Integer, ForeignKey('users.id'))
+    referral_code = Column(String(20), unique=True)
     created_at = Column(DateTime, default=datetime.now)
     expires_at = Column(DateTime)
-    is_admin = Column(Boolean, default=False)
-
+    max_uses = Column(Integer, default=1)  # تعداد مجاز استفاده
+    used_count = Column(Integer, default=0)  # تعداد استفاده شده
+    is_active = Column(Boolean, default=True)
+    is_admin_code = Column(Boolean, default=False)  # کد ادمین/کاربر عادی
     referrer = relationship("User", back_populates="referrals")
+
 
 
 class InvitedUser(Base):
@@ -1419,24 +1222,76 @@ class InvitedUser(Base):
     invited_user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
     invited_full_name = Column(String(255), nullable=False)
     invited_phone = Column(String(20), nullable=False)
-    invited_at = Column(DateTime, default=datetime.now)
+    invited_at = Column(DateTime, server_default=func.now())
 
-    referrer = relationship("User", foreign_keys=[referrer_id], back_populates="invited_users")
-    user = relationship("User", foreign_keys=[invited_user_id])
+    referrer = relationship(
+        "User",
+        foreign_keys=[referrer_id],
+        back_populates="invited_users"
+    )
+
+    user = relationship(
+        "User",
+        foreign_keys=[invited_user_id]
+    )
 
 
+class Wallet(Base):
+    __tablename__ = 'wallets'
+
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    balance = Column(DECIMAL(10, 2), default=0.00)
+    discount = Column(DECIMAL(10, 2), default=0.00)
+
+    user = relationship("User", back_populates="wallet")
 
 
+# Indexes
 
-# تنظیمات اتصال به دیتابیس
+Index('ix_referrals_code', Referral.referral_code)
+Index('ix_files_created_at', File.created_at)
+Index('ix_referrals_expires', Referral.expires_at)
+
+# Database engine configuration
 engine = create_engine(
     f"mysql+pymysql://{Config.DB_USER}:{Config.DB_PASS}@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_NAME}",
-    pool_pre_ping=True
+    pool_size=20,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    connect_args={
+        "connect_timeout": 15,
+        "read_timeout": 30,
+        "write_timeout": 30
+    }
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
+
+# Create tables
+if __name__ == "__main__":
+    Base.metadata.create_all(bind=engine)
+
+==================================================
+# فایل: utils.py
+==================================================
+
+# فایل جدید: utils.py
+def generate_referral_link(bot_username: str, code: str) -> str:
+    return f"https://t.me/{bot_username}?start=ref_{code}"
 
 ==================================================
 # فایل: handlers\admin_handlers.py
@@ -1444,38 +1299,87 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 from telegram import Update
 from telegram.ext import ContextTypes
-import database
-from config import Config
-from database import create_referral, is_admin
-
-from config import Config
-from database import create_referral, is_admin
+from database import is_admin, ADMIN_ID
+from models import SessionLocal, Referral, User
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
+from datetime import datetime, timedelta
+import secrets
+import string
 import logging
+
 logger = logging.getLogger(__name__)
+from sqlalchemy.orm import Session
+from telegram import Update
+from telegram.ext import ContextTypes
+from models import SessionLocal, Referral
+from config import Config
+import secrets
+import string
+from datetime import datetime, timedelta
+
+# در handlers/admin_handlers.py
+from utils import generate_referral_link
+
+from datetime import datetime
+import secrets
+from sqlalchemy.exc import IntegrityError
+
 
 async def admin_generate_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        if not is_admin(user.id):
-            await update.message.reply_text("❌ دسترسی غیرمجاز!")
-            return
+        with SessionLocal() as db:
+            # بررسی مجوز ادمین
+            admin_user = db.query(User).get(user.id)
+            if not admin_user or not admin_user.is_admin:
+                await update.message.reply_text("❌ دسترسی غیرمجاز!")
+                return
 
-        code = create_referral(user.id, is_admin=True)
-        await update.message.reply_text(
-            f"✅ کد دعوت ادمین ایجاد شد:\n`{code}`",
-            parse_mode="Markdown"
-        )
+            # تولید کد یکتا
+            code = None
+            attempts = 0
+            while not code and attempts < 5:
+                try:
+                    code = f"ADMIN_{secrets.token_urlsafe(8)}"
+                    new_ref = Referral(
+                        referrer_id=user.id,
+                        referral_code=code,
+                        expires_at=datetime(2100, 1, 1),
+                        max_uses=999999,
+                        is_admin_code=True
+                    )
+                    db.add(new_ref)
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()
+                    code = None
+                    attempts += 1
+
+            if not code:
+                await update.message.reply_text("❌ خطا در تولید کد!")
+                return
+
+            # ساخت لینک
+            bot = await context.bot.get_me()
+            invite_link = f"https://t.me/{bot.username}?start=ref_{code}"
+
+            await update.message.reply_text(
+                f"🔗 لینک دعوت ادمین:\n{invite_link}\n"
+                "⏳ اعتبار: دائمی\n"
+                "👥 تعداد استفاده: نامحدود"
+            )
+
     except Exception as e:
-        logger.error(f"خطا: {str(e)}")
-        await update.message.reply_text("❌ خطا در تولید کد دعوت")
+        logger.error(f"خطا در تولید لینک: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطا در تولید لینک!")
 
 
 async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != database.ADMIN_ID:
+    if update.effective_user.id != ADMIN_ID:
         return
 
-    users = database.get_all_users()
-
+    users = get_all_users()
     response = "👥 لیست کاربران:\n\n"
     for user in users:
         response += f"🆔 {user[0]} - 📞 {user[2]}\n"
@@ -1483,28 +1387,64 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response)
 
 
-async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != database.ADMIN_ID:
-        return
+from sqlalchemy.orm import aliased
 
+
+def build_tree(root_id: int, db: Session, level: int = 0):
+    """ساختار درختی دعوت‌ها را به صورت متن بازگشت می‌دهد"""
     try:
-        tree_data = database.get_referral_tree(database.ADMIN_ID)
-        if not tree_data:
-            await update.message.reply_text("ℹ️ هیچ ساختار دعوتی وجود ندارد.")
-            return
+        Inviter = aliased(User)
+        Invitee = aliased(User)
 
-        formatted_tree = database.format_referral_tree(tree_data)
+        # دریافت داده‌های سطح فعلی
+        nodes = db.query(
+            Inviter.id.label("inviter_id"),
+            Inviter.full_name.label("inviter_name"),
+            Invitee.id.label("invitee_id"),
+            Invitee.full_name.label("invitee_name")
+        ).join(
+            Invitee, Invitee.inviter_id == Inviter.id
+        ).filter(
+            Inviter.id == root_id
+        ).all()
 
-        # ارسال به صورت کد برای حفظ فرمت
-        await update.message.reply_text(
-            f"🌳 ساختار درختی دعوت‌ها:\n\n"
-            f"<code>{formatted_tree}</code>",
-            parse_mode="HTML"
-        )
+        tree_str = ""
+        prefix = "│   " * (level - 1) + "├── " if level > 0 else ""
+
+        for node in nodes:
+            # افزودن دعوت‌کننده فعلی
+            tree_str += f"{prefix}👤 {node.inviter_name}\n"
+
+            # بازگشت برای فرزندان
+            tree_str += build_tree(node.invitee_id, db, level + 1)
+
+        return tree_str
 
     except Exception as e:
-        print(f"خطا: {str(e)}")
-        await update.message.reply_text("❌ خطا در نمایش درخت دعوت")
+        logger.error(f"خطا در ساخت درخت: {str(e)}")
+        return "❌ خطا در نمایش ساختار"
+
+
+# در handlers/admin_handlers.py
+async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with SessionLocal() as db:
+            # دریافت ادمین ریشه
+            root_admin = db.query(User).filter(
+                User.id == Config.ADMINS[0]
+            ).first()
+
+            if not root_admin:
+                await update.message.reply_text("❌ ادمین اصلی یافت نشد!")
+                return
+
+            tree = build_tree(root_admin.id, db)
+            await update.message.reply_text(f"🌳 ساختار دعوت‌ها:\n{tree}")
+
+    except Exception as e:
+        logger.error(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در نمایش درخت")
+
 
 ==================================================
 # فایل: handlers\file_handlers.py
@@ -1675,17 +1615,22 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # فایل: handlers\user_handlers.py
 ==================================================
 
-from telegram import Update, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
-from datetime import datetime
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
+from keyboards import customer_kb
 import database
-import keyboards
-from keyboards import customer_kb, admin_kb, wallet_kb, archive_reply_kb
-from jdatetime import datetime as jdatetime
-
+from keyboards import admin_kb, customer_kb
+from models import SessionLocal, User, Referral, Wallet
+from sqlalchemy.exc import SQLAlchemyError
+from database import add_user, validate_referral, is_admin
+from config import Config
 import logging
-import sqlite3
-from models import get_db, SessionLocal
 logger = logging.getLogger(__name__)
 
 # تنظیم سطح لاگ
@@ -1699,40 +1644,150 @@ FULL_NAME, PHONE = range(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     try:
         with SessionLocal() as db:
-            # بررسی وجود کاربر در دیتابیس
+            # بررسی اول: آیا کاربر در لیست ادمین‌های config است؟
+            if user.id in Config.ADMINS:
+                db_admin = db.query(User).get(user.id)
+
+                if not db_admin:
+                    # ایجاد رکورد ادمین اگر وجود ندارد
+                    admin_data = {
+                        'id': user.id,
+                        'full_name': user.full_name or "ادمین سیستم",
+                        'phone': "بدون شماره",
+                        'is_admin': True
+                    }
+
+                    if add_user(admin_data):
+                        await update.message.reply_text(
+                            "👑 پنل مدیریتی فعال شد!",
+                            reply_markup=admin_kb
+                        )
+                    else:
+                        await update.message.reply_text("❌ خطا در ایجاد حساب ادمین")
+                    return ConversationHandler.END
+                else:
+                    # به روزرسانی اطلاعات ادمین اگر تغییر کرده
+                    if db_admin.full_name != user.full_name:
+                        db_admin.full_name = user.full_name
+                        db.commit()
+
+                    await update.message.reply_text(
+                        "👑 پنل مدیریتی فعال شد!",
+                        reply_markup=admin_kb
+                    )
+                    return ConversationHandler.END
+
+            # منطق برای کاربران عادی
             db_user = db.query(User).get(user.id)
 
             if db_user:
-                if is_admin(user.id):
-                    await update.message.reply_text(
-                        "👑 پنل مدیریتی فعال شد!",
-                        reply_markup=ReplyKeyboardMarkup([["مدیریت کاربران"], ["آمار سیستم"]], resize_keyboard=True)
-                    )
-                else:
-                    await update.message.reply_text(
-                        "✅ قبلاً ثبت نام کرده‌اید!",
-                        reply_markup=ReplyKeyboardMarkup([["منوی کاربری"]], resize_keyboard=True)
-                    )
+                await update.message.reply_text(
+                    "✅ قبلاً ثبت نام کرده‌اید!",
+                    reply_markup=customer_kb
+                )
                 return ConversationHandler.END
 
-            # بررسی کد دعوت
-            args = context.args
-            referral_code = args[0][4:] if args and args[0].startswith("ref_") else None
+            # استخراج کد دعوت از آرگومان‌ها
+            referral_code = None
+            if context.args:
+                first_arg = context.args[0]
+                if first_arg.startswith("ref_"):
+                    referral_code = first_arg[4:]
 
             if not referral_code:
                 await update.message.reply_text("🔒 دسترسی فقط از طریق لینک دعوت ممکن است!")
                 return ConversationHandler.END
 
+            # اعتبارسنجی کد دعوت
+            valid, referrer_id = validate_referral(db, referral_code)
+            if not valid:
+                await update.message.reply_text(f"❌ {referrer_id}")
+                return ConversationHandler.END
+
             context.user_data["referral_code"] = referral_code
+            context.user_data["referrer_id"] = referrer_id
+
             await update.message.reply_text("👤 لطفاً نام کامل خود را وارد کنید:")
             return FULL_NAME
 
     except Exception as e:
-        logger.error(f"خطا در فرایند شروع: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدد تلاش کنید.")
+        logger.error(f"خطای سیستمی: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+        return ConversationHandler.END
+
+
+async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["full_name"] = update.message.text
+    await update.message.reply_text(
+        "📱 لطفاً شماره تماس خود را ارسال کنید:",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("ارسال شماره 📲", request_contact=True)]],
+            resize_keyboard=True
+        )
+    )
+    return PHONE
+
+
+# فایل: handlers/user_handlers.py
+async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        with SessionLocal() as db:
+            # دریافت شماره تماس
+            if update.message.contact:
+                phone = update.message.contact.phone_number
+            else:
+                phone = update.message.text.strip()
+
+            # بررسی صحت شماره تماس
+            if not phone.startswith('+'):
+                phone = f"+98{phone[-10:]}"  # فرمت ایران
+
+            # آماده‌سازی داده کاربر
+            user_data = {
+                'id': user.id,
+                'full_name': context.user_data["full_name"],
+                'phone': phone,
+                'inviter_id': context.user_data["referrer_id"],
+                'is_admin': False
+            }
+
+            # ذخیره کاربر در دیتابیس
+            if add_user(user_data):
+                # بروزرسانی وضعیت کد رفرال
+                referral = db.query(Referral).filter(
+                    Referral.referral_code == context.user_data["referral_code"]
+                ).first()
+
+                if referral:
+                    referral.used_by = user.id
+                    db.commit()
+
+                # ارسال پیام موفقیت با کیبورد مشتری
+                await update.message.reply_text(
+                    "✅ ثبت نام شما با موفقیت انجام شد!\n"
+                    "لطفاً از منوی زیر استفاده کنید:",
+                    reply_markup=customer_kb  # کیبورد مشتری
+                )
+
+                # کاهش تعداد دعوت‌های باقی‌مانده دعوت‌کننده
+                if referral and not referral.is_admin:
+                    inviter = db.query(User).get(referral.referrer_id)
+                    if inviter:
+                        inviter.remaining_invites -= 1
+                        db.commit()
+            else:
+                await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
+
+    except Exception as e:
+        logger.error(f"خطای سیستمی در ثبت نام: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+
+    finally:
+        # پاکسازی داده‌های موقت
+        context.user_data.clear()
         return ConversationHandler.END
 
 
@@ -1749,44 +1804,76 @@ async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     try:
-        phone = (
-            update.message.contact.phone_number
-            if update.message.contact
-            else update.message.text.strip()
-        )
-
-        user_data = {
-            'id': update.effective_user.id,
-            'full_name': context.user_data["full_name"],
-            'phone': phone,
-            'is_admin': False
-        }
-
-        if add_user(user_data):
-            await update.message.reply_text(
-                "✅ ثبت نام موفق!",
-                reply_markup=ReplyKeyboardMarkup([["منوی کاربری"]], resize_keyboard=True)
+        with SessionLocal() as db:
+            # دریافت شماره تماس
+            phone = (
+                update.message.contact.phone_number
+                if update.message.contact
+                else update.message.text.strip()
             )
-        else:
-            await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
+
+            # فرمت‌دهی شماره ایران
+            if not phone.startswith('+'):
+                phone = f"+98{phone[-10:]}"  # تبدیل به فرمت بین‌المللی
+
+            # دریافت کد رفرال از context
+            referral_code = context.user_data.get("referral_code")
+            referrer_id = None
+
+            # اعتبارسنجی کد رفرال
+            if referral_code:
+                valid, result = validate_referral(db, referral_code)
+                if valid:
+                    referrer_id = result
+                else:
+                    await update.message.reply_text(f"❌ {result}")
+                    return ConversationHandler.END
+
+            # ایجاد کاربر جدید
+            user_data = {
+                'id': user.id,
+                'full_name': context.user_data["full_name"],
+                'phone': phone,
+                'inviter_id': referrer_id,
+                'is_admin': False,
+                'remaining_invites': 5  # مقدار پیش‌فرض
+            }
+
+            if add_user(user_data):
+                # کاهش تعداد دعوت‌های باقی‌مانده دعوت‌کننده
+                if referrer_id:
+                    referrer = db.query(User).get(referrer_id)
+                    if referrer and not referrer.is_admin:
+                        referrer.remaining_invites -= 1
+                        db.commit()
+
+                # ارسال کیبورد مشتری
+                await update.message.reply_text(
+                    "✅ ثبت نام موفق! لطفاً از منوی زیر استفاده کنید:",
+                    reply_markup=customer_kb
+                )
+            else:
+                await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
 
     except Exception as e:
-        logger.error(f"خطا در ثبت نام: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی!")
+        logger.error(f"خطای سیستمی: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
 
     finally:
         context.user_data.clear()
         return ConversationHandler.END
 
 
-def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# فایل: handlers/user_handlers.py
+async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("❌ ثبت نام لغو شد.")
     return ConversationHandler.END
 
 
-# تنظیم هندلرهای گفتگو
+# اصلاح بخش پایانی فایل
 start_conversation = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
@@ -1874,76 +1961,74 @@ async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def generate_user_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        logger.info(f"درخواست لینک دعوت از کاربر {user.id}")
+        with SessionLocal() as db:
+            # بررسی تعداد دعوت‌های باقی‌مانده
+            db_user = db.query(User).get(user.id)
+            if db_user.remaining_invites <= 0:
+                await update.message.reply_text("❌ تعداد دعوت‌های شما تکمیل شده!")
+                return
 
-        # بررسی وجود کاربر در دیتابیس
-        if not database.get_user(user.id):
-            await update.message.reply_text("❌ لطفاً ابتدا ثبت نام کنید!")
-            return
+            # تولید کد یکتا
+            code = f"USER_{secrets.token_urlsafe(8)}"
+            while db.query(Referral).filter_by(referral_code=code).first():
+                code = f"USER_{secrets.token_urlsafe(8)}"
 
-        # دریافت تعداد دعوت‌های باقی‌مانده
-        remaining = database.get_remaining_invites(user.id)
-        if remaining <= 0:
-            await update.message.reply_text("❌ ظرفیت دعوت شما تکمیل شده است!")
-            return
+            # ایجاد رفرال
+            new_ref = Referral(
+                referrer_id=user.id,
+                referral_code=code,
+                expires_at=datetime.now() + timedelta(days=30),
+                max_uses=1,  # تک بار مصرف
+                is_admin_code=False
+            )
 
-        # تولید کد رفرال جدید
-        code, error = database.create_referral(user.id, is_admin=False)
-        if error:
-            await update.message.reply_text(f"❌ {error}")
-            return
+            db.add(new_ref)
+            db_user.remaining_invites -= 1
+            db.commit()
 
-        # ساخت لینک دعوت با فرمت صحیح
-        bot = await context.bot.get_me()
-        referral_link = f"https://t.me/{bot.username}?start=ref_{code}"
+            # ساخت لینک
+            bot = await context.bot.get_me()
+            invite_link = f"https://t.me/{bot.username}?start=ref_{code}"
 
-        # ارسال پاسخ با فرمت HTML برای هایپرلینک
-        await update.message.reply_text(
-            f"🎉 <b>لینک دعوت شما:</b>\n"
-            f"<a href='{referral_link}'>کلیک کنید برای دعوت</a>\n\n"
-            f"🔢 تعداد دعوت باقی‌مانده: <b>{remaining}</b>\n"
-            "⚠️ توجه: کاربر باید مستقیم روی لینک بالا کلیک کند!",
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-        logger.info(f"لینک دعوت برای کاربر {user.id} تولید شد: {code}")
+            await update.message.reply_text(
+                f"🔗 لینک دعوت شما:\n{invite_link}\n"
+                f"📝 تعداد باقی‌مانده: {db_user.remaining_invites}\n"
+                "⚠️ این لینک فقط یک بار قابل استفاده است!"
+            )
 
     except Exception as e:
-        logger.error(f"خطا در تولید لینک دعوت: {str(e)}", exc_info=True)
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+        logger.error(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در تولید لینک!")
 
 
 async def handle_gift_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        logger.debug(f"شروع پردازش درخواست هدیه برای کاربر {user.id}")
+        with SessionLocal() as db:
+            # بررسی شرایط دریافت هدیه
+            user_data = db.query(User).get(user.id)
 
-        # لاگ اطلاعات کاربر
-        user_data = database.get_user(user.id)
-        logger.debug(f"اطلاعات کاربر: {user_data}")
+            # بررسی وجود کاربر در دیتابیس
+            if not user_data:
+                await update.message.reply_text("❌ کاربر یافت نشد!")
+                return
 
-        # بررسی شرایط
-        logger.debug("بررسی شرایط دریافت هدیه")
-        if database.meets_gift_conditions(user.id):
-            logger.debug("کاربر واجد شرایط است")
-
-            # افزودن اعتبار
-            logger.debug("در حال افزودن اعتبار...")
-            if database.add_discount(user.id, 100):
-                logger.debug("اعتبار با موفقیت افزوده شد")
-                await update.message.reply_text("🎉 100 دلار اعتبار هدیه دریافت کردید!")
+            # بررسی شرایط هدیه
+            if meets_gift_conditions(db, user.id):
+                # افزودن اعتبار به کیف پول
+                wallet = db.query(Wallet).get(user.id)
+                if wallet:
+                    wallet.discount += 100  # افزودن 100 واحد اعتبار
+                    db.commit()
+                    await update.message.reply_text("🎉 100 واحد اعتبار هدیه دریافت کردید!")
+                else:
+                    await update.message.reply_text("❌ کیف پول یافت نشد!")
             else:
-                logger.error("خطا در افزودن اعتبار")
-                await update.message.reply_text("❌ خطا در اعطای هدیه!")
-
-        else:
-            logger.debug("کاربر واجد شرایط نیست")
-            await update.message.reply_text("⚠️ شما شرایط دریافت هدیه را ندارید.")
+                await update.message.reply_text("⚠️ شرایط دریافت هدیه را ندارید!")
 
     except Exception as e:
-        logger.exception(f"خطای بحرانی: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً بعداً تلاش کنید.")
+        logger.error(f"خطا در پردازش درخواست هدیه: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
 
 
 # user_handlers.py
@@ -1970,3 +2055,4 @@ async def show_direct_invites(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logging.error(f"خطا در نمایش مدعوین: {str(e)}", exc_info=True)
         await update.message.reply_text("❌ خطای سیستمی!")
+

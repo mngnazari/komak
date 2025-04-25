@@ -74,10 +74,13 @@ TOKEN = "7943645778:AAEXYzDKUc2D7mWaTcLrSkH4AjlJvVq7PaU"
 
 
 
-
+from models import Base, engine
 def main():
     # ایجاد جداول اگر وجود ندارند
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.drop_all(engine)
+
+    # ایجاد جداول جدید
+    Base.metadata.create_all(engine)
 
 
     app = TgApplication.builder().token(TOKEN).build()
@@ -123,6 +126,9 @@ def main():
             filters=filters.User(user_id=ADMINS)  # استفاده از لیست ADMINS
         )
     )
+
+    app.add_handler(MessageHandler(filters.Regex("^🔗 دعوت دوستان$"), generate_user_referral))
+    app.add_handler(MessageHandler(filters.Regex(r"^🎁 تولید لینک دعوت$"), generate_user_referral))
 
     app.run_polling()
 

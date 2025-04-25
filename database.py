@@ -18,12 +18,14 @@ ADMIN_ID = 2138687434
 # ----------------------
 def get_db_connection():
     return mysql.connector.connect(
-        host='localhost',
-        port=3308,          # پورتی که در Docker تنظیم کردید
-        user='testuser',    # کاربر تعریف شده در docker-compose.yml
-        password='testpass', # رمز عبور کاربر testuser
-        database='print3d',
-        connect_timeout = 30
+        host=Config.DB_HOST,
+        port=Config.DB_PORT,
+        user=Config.DB_USER,
+        password=Config.DB_PASS,
+        database=Config.DB_NAME,
+        connect_timeout=30,
+        charset='utf8mb4',
+        collation='utf8mb4_persian_ci'
     )
 
 def is_admin(user_id: int) -> bool:
@@ -85,52 +87,72 @@ def add_user(user_data: dict) -> bool:
 # ==============================
 from mysql.connector import IntegrityError
 
-def create_referral(db: Session, user_id: int, is_admin: bool = False) -> str:
-    while True:
-        code = generate_referral_code(is_admin)
-        existing = db.query(Referral).filter(Referral.referral_code == code).first()
-        if not existing:
-            referral = Referral(
-                referrer_id=user_id,
-                referral_code=code,
-                is_admin=is_admin,
-                expires_at=datetime.now() + timedelta(days=365)
-            )
-            db.add(referral)
-            db.commit()
-            return code
 
-# ----------------------
-# توابع اعتبارسنجی رفرال
-# ----------------------
+def create_referral(db: Session, user_id: int, is_admin: bool = False):
+    """ایجاد کد دعوت با مدیریت خطاهای پیشرفته"""
+    try:
+        # بررسی وجود کاربر
+        user = db.query(User).get(user_id)
+        if not user:
+            return None, "کاربر یافت نشد"
+
+        # تولید کد یکتا
+        while True:
+            code = f"ADMIN_{secrets.token_urlsafe(8)}" if is_admin else f"USER_{secrets.token_hex(4)}"
+            existing = db.query(Referral).filter(Referral.referral_code == code).first()
+            if not existing:
+                break
+
+        # تنظیمات ویژه ادمین
+        referral = Referral(
+            referrer_id=user_id,
+            referral_code=code,
+            expires_at=datetime(2100, 1, 1) if is_admin else datetime.now() + timedelta(days=30),
+            max_uses=999999 if is_admin else 1,
+            is_admin=is_admin
+        )
+
+        db.add(referral)
+        db.commit()
+        return code, None
+
+    except IntegrityError:
+        db.rollback()
+        return None, "خطای یکتایی در تولید کد"
+    except Exception as e:
+        db.rollback()
+        logger.error(f"خطای تولید کد: {str(e)}")
+        return None, "خطای سیستمی"
+
+
 def validate_referral(db: Session, code: str):
+    """اعتبارسنجی کد دعوت با SQLAlchemy"""
     try:
         referral = db.query(Referral).filter(
             Referral.referral_code == code,
-            Referral.is_active == True,
-            Referral.used_count < Referral.max_uses,
-            Referral.expires_at > datetime.now()
+            Referral.expires_at > datetime.now(),
+            Referral.used_count < Referral.max_uses
         ).first()
 
         if not referral:
             return False, "کد نامعتبر یا منقضی شده"
 
+        # بررسی محدودیت کاربران عادی
+        if not referral.is_admin:
+            referrer = db.query(User).get(referral.referrer_id)
+            if referrer.remaining_invites <= 0:
+                return False, "ظرفیت دعوت تکمیل شده"
+
         # افزایش شمارنده استفاده
         referral.used_count += 1
-        if referral.used_count >= referral.max_uses:
-            referral.is_active = False
-
-        # افزودن اعتبار
-        referrer = db.query(User).get(referral.referrer_id)
-        referrer.total_earned += 50  # 50 دلار جایزه
         db.commit()
 
         return True, referral.referrer_id
 
     except Exception as e:
+        db.rollback()
         logger.error(f"خطای اعتبارسنجی: {str(e)}")
         return False, "خطای سیستمی"
-
 
 # ----------------------
 # توابع مدیریت مدعوین

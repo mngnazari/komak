@@ -25,23 +25,42 @@ class User(Base):
 
     id = Column(Integer, primary_key=True)
     full_name = Column(String(255), nullable=False)
-    phone = Column(String(20), unique=True, nullable=False)
+    phone = Column(String(20), unique=True, nullable=True)
     inviter_id = Column(Integer, ForeignKey('users.id'))
-    remaining_invites = Column(Integer, default=1)
+    remaining_invites = Column(Integer, default=5)
+    is_admin = Column(Boolean, default=False)
+    files = relationship("File", back_populates="user")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    is_admin = Column(Boolean, default=False)
-    remaining_invites = Column(Integer, default=5)  # دعوت‌های باقی‌مانده
-    total_earned = Column(DECIMAL(10,2), default=0.00)  # مجموع درآمد از رفرال
 
-    # Relationships
-    inviter = relationship("User", remote_side=[id], back_populates="invitees")
+    # روابط
     invitees = relationship("User", back_populates="inviter")
-    files = relationship("File", back_populates="user")
+    inviter = relationship("User", remote_side=[id], back_populates="invitees")
     referrals = relationship("Referral", back_populates="referrer")
-    invited_users = relationship("InvitedUser", foreign_keys="[InvitedUser.referrer_id]", back_populates="referrer")
-    wallet = relationship("Wallet", uselist=False, back_populates="user")
-    referrals = relationship("Referral", back_populates="referrer")
+    # اصلاح رابطه invited_users
+    invited_users = relationship(
+        "InvitedUser",
+        foreign_keys="[InvitedUser.referrer_id]",
+        back_populates="referrer"
+    )
+    wallet = relationship("Wallet", back_populates="user", uselist=False)
+    invited_by_others = relationship(
+        "InvitedUser",
+        foreign_keys="[InvitedUser.invited_user_id]",
+        back_populates="user"
+    )
+class Referral(Base):
+    __tablename__ = 'referrals'
+
+    id = Column(Integer, primary_key=True)
+    referrer_id = Column(Integer, ForeignKey('users.id'))
+    referral_code = Column(String(20), unique=True)
+    used_count = Column(Integer, default=0)
+    max_uses = Column(Integer, default=1)
+    expires_at = Column(DateTime)
+    is_admin = Column(Boolean, default=False)
+
+    referrer = relationship("User", back_populates="referrals")
 
 
 class File(Base):
@@ -62,20 +81,6 @@ class File(Base):
     user = relationship("User", back_populates="files")
 
 
-class Referral(Base):
-    __tablename__ = 'referrals'
-
-    id = Column(Integer, primary_key=True)
-    referrer_id = Column(Integer, ForeignKey('users.id'))
-    referral_code = Column(String(20), unique=True)
-    created_at = Column(DateTime, default=datetime.now)
-    expires_at = Column(DateTime)
-    max_uses = Column(Integer, default=1)  # تعداد مجاز استفاده
-    used_count = Column(Integer, default=0)  # تعداد استفاده شده
-    is_active = Column(Boolean, default=True)
-    is_admin_code = Column(Boolean, default=False)  # کد ادمین/کاربر عادی
-    referrer = relationship("User", back_populates="referrals")
-
 
 class InvitedUser(Base):
     __tablename__ = 'invited_users'
@@ -86,12 +91,12 @@ class InvitedUser(Base):
     invited_phone = Column(String(20), nullable=False)
     invited_at = Column(DateTime, server_default=func.now())
 
+    # تعریف روابط
     referrer = relationship(
         "User",
         foreign_keys=[referrer_id],
         back_populates="invited_users"
     )
-
     user = relationship(
         "User",
         foreign_keys=[invited_user_id]

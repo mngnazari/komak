@@ -1,71 +1,58 @@
 from telegram import Update
 from telegram.ext import ContextTypes
-from database import is_admin, ADMIN_ID
-from models import SessionLocal, Referral, User
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import aliased
+import logging
 from datetime import datetime, timedelta
 import secrets
 import string
-import logging
+
+from models import SessionLocal, User, Referral
+from config import Config
+from database import create_referral
+from sqlalchemy.orm import Session
+from models import SessionLocal, User, Referral
+from config import Config
 
 logger = logging.getLogger(__name__)
-
-from telegram import Update
-from telegram.ext import ContextTypes
-from models import SessionLocal, Referral
-from config import Config
-import secrets
-import string
-from datetime import datetime, timedelta
-
-# در handlers/admin_handlers.py
-from utils import generate_referral_link
 
 
 async def admin_generate_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
         with SessionLocal() as db:
-            # احراز هویت ادمین
-            if not is_admin(user.id):
+            # بررسی مجوز ادمین
+            admin = db.query(User).get(user.id)
+            if not admin or not admin.is_admin:
                 await update.message.reply_text("❌ دسترسی غیرمجاز!")
                 return
 
-            # تولید کد منحصر به فرد
-            code = f"ADMIN_{secrets.token_urlsafe(8)}"
-            while db.query(Referral).filter_by(referral_code=code).first():
-                code = f"ADMIN_{secrets.token_urlsafe(8)}"
+            # تولید کد دعوت ادمین
+            code, error = create_referral(db, user.id, is_admin=True)
 
-            # ایجاد لینک دعوت
+            if error:
+                logger.error(f"خطا در تولید کد ادمین: {error}")
+                await update.message.reply_text("❌ خطا در تولید کد!")
+                return
+
+            # ساخت لینک دعوت
             bot = await context.bot.get_me()
-            invite_link = generate_referral_link(bot.username, code)
+            invite_link = f"https://t.me/{bot.username}?start=ref_{code}"
 
-            # ذخیره در دیتابیس
-            new_ref = Referral(
-                referrer_id=user.id,
-                referral_code=code,
-                expires_at=datetime.now() + timedelta(days=365),
-                is_admin=True,
-                usage_limit=-1  # نامحدود
+            await update.message.reply_text(
+                f"🎉 لینک دعوت ادمین با موفقیت ایجاد شد!\n\n"
+                f"🔗 لینک: {invite_link}\n"
+                "⚙️ ویژگی‌ها:\n"
+                "- تعداد استفاده: نامحدود\n"
+                "- اعتبار: دائمی\n"
+                "- جایزه هر دعوت: 50 دلار"
             )
 
-            db.add(new_ref)
-            db.commit()
-
-            # ارسال پیام
-            msg = (
-                "🔗 لینک دعوت ادمین:\n"
-                f"{invite_link}\n"
-                "⏳ اعتبار: 1 سال\n"
-                "👥 تعداد استفاده: نامحدود"
-            )
-            await update.message.reply_text(msg)
-
+    except IntegrityError as e:
+        logger.error(f"خطای یکتایی: {str(e)}")
+        await update.message.reply_text("⚠️ کد تکراری! لطفاً مجدد تلاش کنید.")
     except Exception as e:
-        logger.error(f"خطا: {str(e)}")
-        await update.message.reply_text("❌ خطا در تولید لینک!")
-
+        logger.error(f"خطای سیستمی: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای غیرمنتظره! لطفاً لاگ‌ها را بررسی کنید.")
 
 async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -81,47 +68,58 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 from sqlalchemy.orm import aliased
 
+from sqlalchemy.orm import Session  # اضافه کردن این خط
+from models import SessionLocal  # اطمینان از وجود این ایمپورت
 
+# اصلاح تابع build_tree
 def build_tree(root_id: int, db: Session, level: int = 0):
-    """ساختار درختی دعوت‌ها را به صورت متن بازگشت می‌دهد"""
-    try:
-        Inviter = aliased(User)
-        Invitee = aliased(User)
+    async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """نمایش درخت دعوت با ساختار سلسله مراتبی"""
+        try:
+            with SessionLocal() as db:
+                # دریافت کاربر ریشه (ادمین اصلی)
+                root_user = db.query(User).filter(
+                    User.id == Config.ADMINS[0]
+                ).first()
 
-        # دریافت داده‌های سطح فعلی
-        nodes = db.query(
-            Inviter.id.label("inviter_id"),
-            Inviter.full_name.label("inviter_name"),
-            Invitee.id.label("invitee_id"),
-            Invitee.full_name.label("invitee_name")
-        ).join(
-            Invitee, Invitee.inviter_id == Inviter.id
-        ).filter(
-            Inviter.id == root_id
-        ).all()
+                if not root_user:
+                    await update.message.reply_text("❌ ادمین اصلی یافت نشد!")
+                    return
 
-        tree_str = ""
-        prefix = "│   " * (level - 1) + "├── " if level > 0 else ""
+                # ساخت درخت با الگوریتم بازگشتی
+                def build_tree(user_id: int, level: int = 0):
+                    branches = []
+                    current_user = db.query(User).get(user_id)
 
-        for node in nodes:
-            # افزودن دعوت‌کننده فعلی
-            tree_str += f"{prefix}👤 {node.inviter_name}\n"
+                    # افزودن کاربر فعلی
+                    prefix = "│   " * (level - 1) + "├── " if level > 0 else ""
+                    branches.append(f"{prefix}👤 {current_user.full_name} (ID: {current_user.id})")
 
-            # بازگشت برای فرزندان
-            tree_str += build_tree(node.invitee_id, db, level + 1)
+                    # بازگشت برای فرزندان
+                    children = db.query(User).filter(User.inviter_id == user_id).all()
+                    for child in children:
+                        branches.extend(build_tree(child.id, level + 1))
 
-        return tree_str
+                    return branches
 
-    except Exception as e:
-        logger.error(f"خطا در ساخت درخت: {str(e)}")
-        return "❌ خطا در نمایش ساختار"
+                # ساختار نهایی
+                tree = "\n".join(build_tree(root_user.id))
+
+                await update.message.reply_text(
+                    f"🌳 ساختار سلسله مراتبی:\n\n{tree}",
+                    parse_mode="HTML"
+                )
+
+        except Exception as e:
+            logger.error(f"خطا در نمایش درخت: {str(e)}", exc_info=True)
+            await update.message.reply_text("❌ خطا در ایجاد ساختار درختی")
 
 
-# در handlers/admin_handlers.py
 async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش ساختار سلسله مراتبی دعوت‌ها"""
     try:
         with SessionLocal() as db:
-            # دریافت ادمین ریشه
+            # دریافت کاربر ریشه (اولین ادمین)
             root_admin = db.query(User).filter(
                 User.id == Config.ADMINS[0]
             ).first()
@@ -130,9 +128,45 @@ async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await update.message.reply_text("❌ ادمین اصلی یافت نشد!")
                 return
 
-            tree = build_tree(root_admin.id, db)
-            await update.message.reply_text(f"🌳 ساختار دعوت‌ها:\n{tree}")
+            # ساخت درخت با کوئری بازگشتی
+            Inviter = aliased(User)
+            Invitee = aliased(User)
+
+            query = db.query(
+                Inviter.id.label("inviter_id"),
+                Inviter.full_name.label("inviter_name"),
+                Invitee.id.label("invitee_id"),
+                Invitee.full_name.label("invitee_name")
+            ).join(
+                Invitee, Invitee.inviter_id == Inviter.id
+            ).filter(
+                Inviter.id == Config.ADMINS[0]
+            )
+
+            tree = {}
+            for row in query.all():
+                tree.setdefault(row.inviter_id, []).append({
+                    "invitee_id": row.invitee_id,
+                    "invitee_name": row.invitee_name
+                })
+
+            # ساخت متن قابل نمایش
+            def build_branch(parent_id, level=0):
+                branch = []
+                prefix = "│   " * (level - 1) + "├── " if level > 0 else ""
+
+                if parent_id in tree:
+                    for child in tree[parent_id]:
+                        branch.append(f"{prefix}👤 {child['invitee_name']} (ID: {child['invitee_id']})")
+                        branch.extend(build_branch(child['invitee_id'], level + 1))
+
+                return branch
+
+            result = ["🌳 ساختار دعوت‌ها:\n"]
+            result.extend(build_branch(Config.ADMINS[0]))
+
+            await update.message.reply_text("\n".join(result))
 
     except Exception as e:
-        logger.error(f"خطا: {str(e)}")
-        await update.message.reply_text("❌ خطا در نمایش درخت")
+        logger.error(f"خطا در نمایش درخت: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطا در ایجاد ساختار درختی")
